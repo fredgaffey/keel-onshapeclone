@@ -11,6 +11,14 @@
 - [ ] STL and STEP export; volume, area and mass measurements
 - [ ] Tests: kernel tests (feature results), API and permission tests, multi-client collaboration tests, Playwright end-to-end tests
 
+## Phase 1b: Offline and local files
+- [ ] Installable app (PWA): a service worker caches the app and the WebAssembly kernel so Keel opens offline
+- [ ] Local copies of documents in IndexedDB (y-indexeddb); offline edits merge automatically on reconnect
+- [ ] Imported files stored locally in OPFS (the browser's private file storage), uploaded to R2 when online
+- [ ] `.keel` file format (zip: manifest, editing state, feature list as JSON, attached files) for saving to and opening from disk
+- [ ] Local-only documents that never touch the server
+- [ ] Ask the browser for persistent storage so offline data isn't evicted
+
 ## Phase 2: Documents and history
 - [ ] Multiple tabs per document (Part Studios and Assemblies)
 - [ ] Versions, history, restoring an earlier version, branching
