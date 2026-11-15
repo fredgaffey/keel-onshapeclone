@@ -44,11 +44,13 @@
 ## Phase 5b: AI agents and Keel Script
 - [ ] Keel Script: a typed TypeScript modelling API (our take on FeatureScript), running deterministically in a sandboxed worker; custom features are written in it
 - [ ] One operations API shared by the UI, Keel Script, and agents: read the feature list, add or edit features, query faces and edges with stable references, measure, render a view
-- [ ] Remote MCP server (Cloudflare Agents SDK and Durable Objects, OAuth 2.1). Users connect Claude, ChatGPT, Cursor and other clients, and pay for their own tokens
+- [ ] Agents model directly with the same features a person uses (sketch, extrude, fillet...), step by step; Keel Script only for custom features
+- [ ] Local MCP server (`npx keel-mcp`): runs the headless WebAssembly kernel on the user's device and syncs with the document like any other collaborator. The server never models
+- [ ] Remote MCP endpoint (OAuth 2.1) for web-based clients (claude.ai, ChatGPT): relays tool calls to a device running Keel (an open tab or keel-mcp). Users pay for their own tokens
 - [ ] Agents appear in documents as collaborators (presence, live edits). Each agent turn is one undoable step; an optional branch-and-review mode
 - [ ] Per-document agent permissions (viewer or editor), revocable connections, activity log
 - [ ] In-app agent panel with the user's own API key (Anthropic or OpenAI) kept in the browser, or OpenRouter sign-in
-- [ ] Rebuilding the model without a browser open (for MCP when no tab is open): the kernel in Cloudflare Containers, or relayed to an open tab
+- [ ] Auto-naming of features, sketches and parts ("Base plate", "Mounting holes ×4", "Edge fillets R2") from geometry and context. Rules first, a model call when one is connected. Never overwrites a name a person typed
 
 ## Phase 6: Input and polish
 - [ ] SpaceMouse support through WebHID, with 3Dconnexion's web library as a fallback
