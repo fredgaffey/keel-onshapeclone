@@ -41,6 +41,15 @@
 - [ ] Linear static finite-element analysis (stress and displacement) in a Web Worker, sped up with WebGPU
 - [ ] Modal analysis
 
+## Phase 5b: AI agents and Keel Script
+- [ ] Keel Script: a typed TypeScript modelling API (our take on FeatureScript), running deterministically in a sandboxed worker; custom features are written in it
+- [ ] One operations API shared by the UI, Keel Script, and agents: read the feature list, add or edit features, query faces and edges with stable references, measure, render a view
+- [ ] Remote MCP server (Cloudflare Agents SDK and Durable Objects, OAuth 2.1). Users connect Claude, ChatGPT, Cursor and other clients, and pay for their own tokens
+- [ ] Agents appear in documents as collaborators (presence, live edits). Each agent turn is one undoable step; an optional branch-and-review mode
+- [ ] Per-document agent permissions (viewer or editor), revocable connections, activity log
+- [ ] In-app agent panel with the user's own API key (Anthropic or OpenAI) kept in the browser, or OpenRouter sign-in
+- [ ] Rebuilding the model without a browser open (for MCP when no tab is open): the kernel in Cloudflare Containers, or relayed to an open tab
+
 ## Phase 6: Input and polish
 - [ ] SpaceMouse support through WebHID, with 3Dconnexion's web library as a fallback
 - [ ] Onshape- and Fusion-inspired layout: feature list, timeline, ribbon toolbar, right-click marking menu
