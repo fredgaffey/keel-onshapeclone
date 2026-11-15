@@ -1,0 +1,32 @@
+{
+  "name": "keel",
+  "version": "0.0.1",
+  "description": "Keel - collaborative browser CAD (WebAssembly kernel, Cloudflare-hosted)",
+  "scripts": {},
+  "license": "ISC",
+  "type": "module",
+  "dependencies": {
+    "lib0": "^0.2.120",
+    "react": "^19.3.1",
+    "react-dom": "^19.3.1",
+    "replicad": "^1.2.1",
+    "replicad-opencascadejs": "^1.2.1",
+    "three": "^0.187.0",
+    "y-protocols": "^1.0.7",
+    "yjs": "^13.6.33"
+  },
+  "devDependencies": {
+    "@playwright/test": "^1.65.1",
+    "@types/node": "^26.6.6",
+    "@types/react": "^19.3.0",
+    "@types/react-dom": "^19.3.0",
+    "@types/three": "^0.187.0",
+    "@vitejs/plugin-react": "^6.3.0",
+    "concurrently": "^10.0.7",
+    "tsx": "^4.23.15",
+    "typescript": "^7.0.2",
+    "vite": "^8.3.8",
+    "vitest": "^4.1.12"
+  },
+  "private": true
+}
