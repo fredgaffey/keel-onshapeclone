@@ -1,0 +1,10 @@
+{
+  "name": "Keel",
+  "short_name": "Keel",
+  "description": "Collaborative CAD in the browser",
+  "start_url": "/",
+  "display": "standalone",
+  "background_color": "#18233a",
+  "theme_color": "#18233a",
+  "icons": [{ "src": "/img/keel.svg", "sizes": "any", "type": "image/svg+xml" }]
+}

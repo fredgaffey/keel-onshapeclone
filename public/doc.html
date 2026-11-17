@@ -1,0 +1,30 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Keel</title>
+<link rel="icon" href="/img/keel.svg">
+<link rel="manifest" href="/manifest.webmanifest">
+<meta name="theme-color" content="#18233a">
+<link rel="stylesheet" href="/css/keel.css">
+</head>
+<body>
+<div class="editor">
+  <header class="bar">
+    <a class="brand" href="/" title="All documents"><img src="/img/keel.svg" alt="Keel" width="24" height="24"></a>
+    <input class="docname-input" id="docname" aria-label="Document name" value="">
+    <span class="status" id="status"><span class="dot"></span><span id="status-text">Connecting…</span></span>
+    <span class="spacer"></span>
+    <span class="avatars" id="peers"></span>
+    <button class="btn" id="versions-btn">Versions</button>
+    <button class="btn hide-narrow" id="download-btn">Download</button>
+    <button class="btn primary" id="share-btn">Share</button>
+  </header>
+  <div id="banner"></div>
+  <iframe id="cad" title="SolidCraft design editor" allow="fullscreen; clipboard-read; clipboard-write; hid"></iframe>
+  <div class="loading" id="loading"><div class="box"><div class="spinner"></div><div id="loading-text">Loading the modeller…</div><div style="font-size:12px;opacity:.7;margin-top:6px">The first load downloads about 32 MB; after that it's cached.</div></div></div>
+</div>
+<script type="module" src="/js/editor.js"></script>
+</body>
+</html>

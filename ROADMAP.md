@@ -1,57 +1,65 @@
 # Roadmap
 
-## Phase 1: Core Part Studio
-- [ ] Accounts: sign up, log in, sessions (Workers and D1)
-- [ ] Documents: create, rename, delete, list, share (owner, editor and viewer roles, checked on the server)
-- [ ] Real-time collaboration: Yjs and Durable Objects, presence, live feature edits
-- [ ] Kernel worker: rebuild the model whenever its feature list changes
-- [ ] Features: sketch (on planes and faces), extrude, revolve, fillet, chamfer, shell, booleans, linear and circular patterns, mirror, variables and expressions
-- [ ] Feature list, timeline, rollback, suppress, reorder
-- [ ] Viewport: orbit, pan and zoom, view cube, face and edge selection
-- [ ] STL and STEP export; volume, area and mass measurements
-- [ ] Tests: kernel tests (feature results), API and permission tests, multi-client collaboration tests, Playwright end-to-end tests
+Keel is built around [SolidCraft](https://github.com/tangency-labs/solidcraft). SolidCraft
+already supplies these, and Keel uses them as they are:
+- part modelling: sketches, features, sheet metal and weldments
+- assemblies and joints
+- STEP, STL and 3MF import and export
+- a SpaceMouse driver
+- the modelling UI
 
-## Phase 1b: Offline and local files
-- [ ] Installable app (PWA): a service worker caches the app and the WebAssembly kernel so Keel opens offline
-- [ ] Local copies of documents in IndexedDB (y-indexeddb); offline edits merge automatically on reconnect
-- [ ] Imported files stored locally in OPFS (the browser's private file storage), uploaded to R2 when online
-- [ ] `.keel` file format (zip: manifest, editing state, feature list as JSON, attached files) for saving to and opening from disk
-- [ ] Local-only documents that never touch the server
-- [ ] Ask the browser for persistent storage so offline data isn't evicted
+Keel's work is the cloud, collaboration and anything SolidCraft defers.
 
-## Phase 2: Documents and history
-- [ ] Multiple tabs per document (Part Studios and Assemblies)
-- [ ] Versions, history, restoring an earlier version, branching
-- [ ] Document usage and activity
-- [ ] STEP, IGES and STL import (stored in R2)
+## Done (0.1)
+- [x] Accounts: sign up, sign in and sign out, with D1 sessions
+- [x] Documents:
+  - [x] create, rename, delete, list, search
+  - [x] import a design file and download one
+- [x] Sharing (owner, can edit, can view), enforced on the server; removing access disconnects the person
+- [x] Live co-editing through a Durable Object per document:
+  - [x] presence
+  - [x] three-way merge of simultaneous edits
+  - [x] a conflicted copy when a merge won't rebuild
+- [x] Versions: named, automatic every 100 changes, restore, download
+- [x] On-device copies in IndexedDB:
+  - [x] open and edit offline
+  - [x] offline edits sync on reconnect
+  - [x] documents created offline upload later
+- [x] Backup of every document to a folder on disk (File System Access API)
+- [x] Installable app; the shell and SolidCraft are cached for offline use
+- [x] Cloudflare deployment: Workers, static assets, D1, R2 and Durable Objects
+- [x] Tests: merge unit tests; an end-to-end test with three browsers
 
-## Phase 3: Assemblies
-- [ ] Insert parts from Part Studios and other documents
-- [ ] Joints: fastened, revolute, slider, cylindrical, planar, ball (WebAssembly constraint solver)
-- [ ] Joint limits, driving joints, animation and motion control
-- [ ] Interference checks
+## Next
+- [ ] Deploy to Cloudflare behind Access
+- [ ] Keep the camera and undo history when a remote change arrives. This needs a SolidCraft
+      API that applies changes without reopening the design, which could be proposed upstream
+- [ ] Show other people's selection and current tool in the viewport
+- [ ] Account management: password reset, email verification, rate limiting, deleting an
+      account; optionally sign-in through Cloudflare Access instead
+- [ ] Document thumbnails, folders, a trash with undelete
+- [ ] Linked designs (one design inserting another) across documents, stored in R2
+- [ ] Branches of a document, and comparing two versions
 
-## Phase 4: Onshape interop
+## Onshape interop
 - [ ] "Sign in with Onshape" (OAuth)
-- [ ] Import Part Studios and Assemblies (geometry through STEP or Parasolid; rebuild the feature list where possible)
+- [ ] Import Part Studios and Assemblies (geometry through STEP, and the feature list where it
+      can be rebuilt)
 - [ ] Browse the public library
 
-## Phase 5: Simulation (on device)
+## Simulation (on device), which SolidCraft's roadmap defers
 - [ ] Tetrahedral meshing in WebAssembly
-- [ ] Linear static finite-element analysis (stress and displacement) in a Web Worker, sped up with WebGPU
-- [ ] Modal analysis
+- [ ] Linear static FEA (stress and displacement) in a Web Worker, sped up with WebGPU; modal analysis
+- [ ] Quick-look CFD (lattice Boltzmann on WebGPU), then finite-volume CFD
+- [ ] Validation against benchmark cases
 
-## Phase 5b: AI agents and Keel Script
-- [ ] Keel Script: a typed TypeScript modelling API (our take on FeatureScript), running deterministically in a sandboxed worker; custom features are written in it
-- [ ] One operations API shared by the UI, Keel Script, and agents: read the feature list, add or edit features, query faces and edges with stable references, measure, render a view
-- [ ] Agents model directly with the same features a person uses (sketch, extrude, fillet...), step by step; Keel Script only for custom features
-- [ ] Local MCP server (`npx keel-mcp`): runs the headless WebAssembly kernel on the user's device and syncs with the document like any other collaborator. The server never models
-- [ ] Remote MCP endpoint (OAuth 2.1) for web-based clients (claude.ai, ChatGPT): relays tool calls to a device running Keel (an open tab or keel-mcp). Users pay for their own tokens
-- [ ] Agents appear in documents as collaborators (presence, live edits). Each agent turn is one undoable step; an optional branch-and-review mode
-- [ ] Per-document agent permissions (viewer or editor), revocable connections, activity log
-- [ ] In-app agent panel with the user's own API key (Anthropic or OpenAI) kept in the browser, or OpenRouter sign-in
-- [ ] Auto-naming of features, sketches and parts ("Base plate", "Mounting holes ×4", "Edge fillets R2") from geometry and context. Rules first, a model call when one is connected. Never overwrites a name a person typed
+## AI agents
+- [ ] Agent panel in Keel using your own Anthropic or OpenAI key (kept in the browser) and
+      driving SolidCraft's command API, with features named automatically
+- [ ] Agents join a document as collaborators (presence, live edits); each turn is one version
+- [ ] Remote MCP relay so claude.ai and ChatGPT can work on an open document. The server never
+      models
+- [ ] Keel Script: a typed successor to FeatureScript for custom features
 
-## Phase 6: Input and polish
-- [ ] SpaceMouse support through WebHID, with 3Dconnexion's web library as a fallback
-- [ ] Onshape- and Fusion-inspired layout: feature list, timeline, ribbon toolbar, right-click marking menu
+## UI
+- [ ] Keel's own look (UI kit, theme, icons), so a public deployment doesn't use SolidCraft's brand

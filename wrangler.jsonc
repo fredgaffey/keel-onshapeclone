@@ -1,0 +1,26 @@
+// Keel on Cloudflare: one Worker serves the site and the API.
+//   D1 "keel"        accounts, sessions, the document list, sharing, versions
+//   R2 "keel-files"  version snapshots, and SolidCraft's WebAssembly (too big for static assets)
+//   Durable Objects  DocRoom: one per document, holds the live design and the editing session
+// See README.md › "Deploying" for the one-time setup.
+{
+  "name": "keel",
+  "main": "worker/index.js",
+  "compatibility_date": "2026-06-24",
+  "assets": {
+    "directory": "./public",
+    "binding": "ASSETS",
+    "not_found_handling": "none"
+  },
+  "d1_databases": [
+    { "binding": "DB", "database_name": "keel", "database_id": "local-dev-placeholder", "migrations_dir": "migrations" }
+  ],
+  "r2_buckets": [{ "binding": "FILES", "bucket_name": "keel-files" }],
+  "durable_objects": { "bindings": [{ "name": "ROOMS", "class_name": "DocRoom" }] },
+  "migrations": [{ "tag": "v1", "new_sqlite_classes": ["DocRoom"] }],
+  "vars": {
+    // "open": anyone who reaches the site can make an account. "closed": none can (put the site
+    // behind Cloudflare Access and make accounts while it's open, or switch it back briefly).
+    "SIGNUP": "open"
+  }
+}
