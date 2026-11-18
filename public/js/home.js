@@ -71,8 +71,11 @@ async function showAuth(mode) {
 async function showHome(offline = false) {
   net.hidden = !offline;
   who.innerHTML = `<button class="btn ghost" id="usermenu" title="${esc(me.email)}"><span class="avatar" style="background:#4f5d75">${esc(initials(me.name))}</span><span class="hide-narrow">${esc(me.name)}</span></button>`;
+  const dev = offline ? false : await api('/config').then((c) => c.dev, () => false);
+  if (dev) who.insertAdjacentHTML('afterbegin', '<span class="pill" style="color:#f2a541;border-color:#f2a541;margin-right:8px" title="DEV_AUTH=1: sign-in is skipped on localhost">Dev mode</span>');
   document.getElementById('usermenu').onclick = (e) => menu(e.currentTarget, [
     [`Signed in as ${me.email}`, null],
+    ...(dev ? [['Switch user (dev)…', () => { const n = prompt('Become which user? (made if new)', 'Bob'); if (n) location.href = `/api/dev/as?name=${encodeURIComponent(n)}`; }]] : []),
     ['Sign out', async () => { await api('/logout', { method: 'POST', body: {} }).catch(() => {}); location.reload(); }],
   ]);
   root.innerHTML = `

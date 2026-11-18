@@ -86,7 +86,7 @@ try {
   await step('the home page lists the document', async () => {
     await alice.page.goto(BASE);
     await alice.page.getByText('Bracket v1').waitFor();
-    await alice.page.screenshot({ path: process.env.SHOTS ? `${process.env.SHOTS}/home.png` : '/dev/null' });
+    if (process.env.SHOTS) await alice.page.screenshot({ path: `${process.env.SHOTS}/home.png` });
   });
 
   await step('both open the editor', async () => {

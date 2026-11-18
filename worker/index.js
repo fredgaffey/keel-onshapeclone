@@ -81,10 +81,18 @@ async function api(request, env, url) {
     return json({ ok: true }, 200, { 'set-cookie': await endSession(env, request) });
   }
   if (path === '/config' && method === 'GET') {
-    return json({ signup: env.SIGNUP !== 'closed' });
+    return json({ signup: env.SIGNUP !== 'closed', dev: devMode(env, url) });
   }
 
-  const user = await currentUser(env, request);
+  if (path === '/dev/as' && method === 'GET') {
+    // Dev mode: become any user by name, e.g. /api/dev/as?name=Bob (made on first use).
+    if (!devMode(env, url)) throw new HttpError(404, 'Not found.');
+    const user = await devUser(env, url.searchParams.get('name') || 'Dev');
+    return new Response(null, { status: 302, headers: { location: url.searchParams.get('next') || '/', 'set-cookie': await startSession(env, user.id, secure) } });
+  }
+
+  let user = await currentUser(env, request);
+  if (!user && devMode(env, url)) user = await devUser(env, 'Dev');
   if (!user) throw new HttpError(401, 'Sign in first.');
 
   if (path === '/me' && method === 'GET') return json({ user });
@@ -237,4 +245,23 @@ function checkDesign(text) {
   let parsed;
   try { parsed = JSON.parse(text); } catch { throw new HttpError(400, 'That isn\'t a SolidCraft design (not JSON).'); }
   if (!parsed || typeof parsed.format !== 'string' || !Array.isArray(parsed.features)) throw new HttpError(400, 'That isn\'t a SolidCraft design.');
+}
+
+// Dev mode skips sign-in: with DEV_AUTH=1 (in .dev.vars, never in wrangler.jsonc) every request
+// without a session is the user "Dev". It only ever applies on localhost, so a deployment with the
+// variable set by mistake still asks everyone to sign in.
+function devMode(env, url) {
+  return env.DEV_AUTH === '1' && ['localhost', '127.0.0.1', '[::1]'].includes(url.hostname);
+}
+
+async function devUser(env, name) {
+  name = cleanName(name).slice(0, 40) || 'Dev';
+  const email = `${name.toLowerCase().replace(/[^a-z0-9]+/g, '-') || 'dev'}@dev.localhost`;
+  const row = await env.DB.prepare('SELECT id, email, name FROM users WHERE email = ?').bind(email).first();
+  if (row) return row;
+  const id = randomId();
+  await env.DB.prepare('INSERT INTO users (id, email, name, pw_salt, pw_hash, created_at) VALUES (?, ?, ?, ?, ?, ?)')
+    .bind(id, email, name, '', '!', Date.now()) // '!' matches no PBKDF2 hash: no password sign-in
+    .run();
+  return { id, email, name };
 }

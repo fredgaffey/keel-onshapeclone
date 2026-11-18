@@ -74,6 +74,14 @@ npm run db:local                # create the local D1 tables
 npm run dev                     # http://127.0.0.1:8787
 ```
 
+**Dev mode (no sign-in):** put `DEV_AUTH=1` in `.dev.vars`, which git ignores. Then:
+- Every request without a session counts as the user "Dev".
+- `/api/dev/as?name=Bob` signs you in as Bob, creating him if needed, so a second browser
+  window can act as someone else. The home page's user menu has a "Switch user (dev)" item that
+  does the same.
+- It only works on `localhost` and `127.0.0.1`, so a deployment with the variable set by mistake
+  still requires sign-in.
+
 ## Tests
 
 ```sh

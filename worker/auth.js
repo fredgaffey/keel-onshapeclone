@@ -7,7 +7,7 @@ const PBKDF2_ITERATIONS = 100_000; // the most Workers' WebCrypto allows
 
 const enc = new TextEncoder();
 const hex = (buf) => [...new Uint8Array(buf)].map((b) => b.toString(16).padStart(2, '0')).join('');
-const fromHex = (s) => new Uint8Array(s.match(/../g).map((h) => parseInt(h, 16)));
+const fromHex = (s) => new Uint8Array((s.match(/../g) || []).map((h) => parseInt(h, 16)));
 
 export function randomId(bytes = 12) {
   const alphabet = 'abcdefghijkmnopqrstuvwxyzABCDEFGHJKLMNPQRSTUVWXYZ23456789';
