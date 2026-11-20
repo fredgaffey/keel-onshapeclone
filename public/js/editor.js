@@ -419,6 +419,15 @@ function wireBar() {
   nameInput.addEventListener('blur', commit);
   $('share-btn').onclick = shareDrawer;
   $('versions-btn').onclick = versionsDrawer;
+  // Flexblade: a panel talking to a local `flexblade gui` server (pull STEP, push parameters).
+  // Loaded on first click; its engine work goes through `serial` like ours.
+  $('flexblade-btn').hidden = S.role === 'view';
+  $('flexblade-btn').onclick = async () => {
+    if (!S.cad) return toast('The modeller is still loading', 'error');
+    if (S.flexblade) return S.flexblade.toggle();
+    const { install } = await import('./flexblade.js');
+    S.flexblade = install({ app: S.cad, frame: $('cad'), run: serial });
+  };
   $('download-btn').onclick = () => serial(async () => {
     await readEngine();
     local.download(local.fileName(S.name, docId), S.known);
