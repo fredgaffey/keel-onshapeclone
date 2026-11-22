@@ -1,0 +1,86 @@
+From 4f696b1e8941ea9b5a81bed34549cfa8fbc0b2df Mon Sep 17 00:00:00 2001
+From: Keel <noreply@anthropic.com>
+Date: Sun, 22 Nov 2026 22:02:21 +1100
+Subject: [PATCH] Arrow keys stop at straight up or down instead of flipping
+ the view
+
+Holding Up or Down turned the view past the pole: the new direction faced the other way, the
+next step (taken from there) turned it back, and the view flipped 180 degrees every frame.
+Stepped turns (the arrow keys) now tilt by the angle and stop at the pole, keeping the heading;
+the navigation cube's quarter turns still go over the top.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ crates/engine/src/cmd/view_navigation.rs | 46 ++++++++++++++++++++++--
+ 1 file changed, 44 insertions(+), 2 deletions(-)
+
+diff --git a/crates/engine/src/cmd/view_navigation.rs b/crates/engine/src/cmd/view_navigation.rs
+index 916d7212..df467488 100644
+--- a/crates/engine/src/cmd/view_navigation.rs
++++ b/crates/engine/src/cmd/view_navigation.rs
+@@ -587,11 +587,28 @@ fn navigate(_s: &mut Session, p: &Value) -> Result<Value> {
+                 .ok_or_else(|| bad(cmd, "degrees must be a number above 0 and at most 180"))?,
+         };
+         let turn = |toward: solidcore_record::Vec3| cam.looking_from(b * cos + toward * sin);
++        // Up and down by a step (the arrow keys, held or tapped) stop at straight up or down. A
++        // step past the pole would leave the view facing the other way, and the next step,
++        // taken from there, turns it back: holding the key flipped the view every frame.
++        // Quarter turns (the navigation cube's arrows) still go over the top as before.
++        let stepped = p.get("degrees").and_then(Value::as_f64).filter(|d| *d < 90.0);
++        let lim = FRAC_PI_2 - 1e-6;
++        let tilt = |toward: solidcore_record::Vec3, sign: f64| match stepped {
++            // An upright view: tilt by the angle, stopping at the pole, heading unchanged.
++            Some(d) if cam.roll.abs() < 1e-9 => Camera { pitch: (cam.pitch + sign * d.to_radians()).clamp(-lim, lim), ..cam },
++            // A rolled view turns about its own axes; still stop rather than cross the pole.
++            Some(_) => {
++                let (before, after) = (cam.up.to_frame(b), cam.up.to_frame(b * cos + toward * sin));
++                let crossed = before.x.hypot(before.y) > 1e-4 && before.x * after.x + before.y * after.y < 0.0;
++                if crossed { Camera { pitch: if after.z > 0.0 { lim } else { -lim }, roll: 0.0, ..cam } } else { turn(toward) }
++            }
++            None => turn(toward),
++        };
+         match p.get("action").and_then(Value::as_str) {
+             Some("left") => cam = turn(-r),
+             Some("right") => cam = turn(r),
+-            Some("up") => cam = turn(u),
+-            Some("down") => cam = turn(-u),
++            Some("up") => cam = tilt(u, 1.0),
++            Some("down") => cam = tilt(-u, -1.0),
+             Some("clockwise") => cam.roll = (cam.roll + FRAC_PI_2).rem_euclid(std::f64::consts::TAU),
+             Some("counterclockwise") => cam.roll = (cam.roll - FRAC_PI_2).rem_euclid(std::f64::consts::TAU),
+             Some("home") => {
+@@ -871,6 +888,31 @@ mod tests {
+     }
+ 
+     /// #1541: left, right, up and down turn a quarter turn, or `degrees` (the arrow keys' 15°).
++    #[test]
++    fn arrow_steps_stop_at_the_pole_instead_of_flipping() {
++        // Holding Down at the bottom must not alternate the heading by half a turn each step.
++        let mut s = Session::default();
++        let mut cam = Camera { yaw: -0.785, pitch: 0.6, distance: 100.0, ..Default::default() };
++        let mut yaws = Vec::new();
++        for _ in 0..200 {
++            let v = s.execute("view.navigate", &json!({"camera": cam, "action": "down", "degrees": 1.5})).unwrap();
++            cam = serde_json::from_value(v["camera"].clone()).unwrap();
++            yaws.push(cam.yaw);
++        }
++        assert!(cam.pitch < -1.57, "reaches straight down: {}", cam.pitch);
++        assert!(yaws.iter().all(|y| (y + 0.785).abs() < 1e-6), "keeps its heading at the pole: {:?}", &yaws[yaws.len() - 6..]);
++        for _ in 0..30 {
++            let v = s.execute("view.navigate", &json!({"camera": cam, "action": "up", "degrees": 1.5})).unwrap();
++            cam = serde_json::from_value(v["camera"].clone()).unwrap();
++        }
++        assert!((cam.yaw + 0.785).abs() < 1e-6 && cam.pitch > -1.5, "and comes back up the same way: {cam:?}");
++        // The navigation cube's quarter turn still goes over the top.
++        let over = Camera { yaw: 0.0, pitch: 0.8, distance: 100.0, ..Default::default() };
++        let v = s.execute("view.navigate", &json!({"camera": over, "action": "up"})).unwrap();
++        let to: Camera = serde_json::from_value(v["camera"].clone()).unwrap();
++        assert!((to.yaw - over.yaw).abs() > 3.0, "a quarter turn past the top faces the other way: {to:?}");
++    }
++
+     #[test]
+     fn turns_take_degrees_and_default_to_a_quarter_turn() {
+         let mut s = Session::default();
+-- 
+2.55.0
+
