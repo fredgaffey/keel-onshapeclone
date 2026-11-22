@@ -7,13 +7,14 @@
   "name": "keel",
   "main": "worker/index.js",
   "compatibility_date": "2026-06-24",
+  "routes": [{ "pattern": "keel.pebnum.com", "custom_domain": true }],
   "assets": {
     "directory": "./public",
     "binding": "ASSETS",
     "not_found_handling": "none"
   },
   "d1_databases": [
-    { "binding": "DB", "database_name": "keel", "database_id": "local-dev-placeholder", "migrations_dir": "migrations" }
+    { "binding": "DB", "database_name": "keel", "database_id": "6ffaff05-a1de-4126-8bf9-c82216b07f47", "migrations_dir": "migrations" }
   ],
   "r2_buckets": [{ "binding": "FILES", "bucket_name": "keel-files" }],
   "durable_objects": { "bindings": [{ "name": "ROOMS", "class_name": "DocRoom" }] },
