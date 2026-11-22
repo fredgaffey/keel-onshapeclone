@@ -113,7 +113,7 @@ async function tokenUser(env, token) {
 }
 
 export async function createToken(env, userId, { name, scope, days, documentId = null, expiresAt = null }) {
-  name = String(name || '').replace(/[\u0000-\u001f]/g, '').trim().slice(0, 80);
+  name = String(name || '').replace(/[\u0000-\u001f\u202a-\u202e\u2066-\u2069]/g, '').trim().slice(0, 80);
   if (!name) throw new HttpError(400, 'Give the token a name, such as "Claude Code on my laptop".');
   if (scope !== 'read') scope = 'write';
   days = Number(days) || 0;

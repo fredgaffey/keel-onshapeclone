@@ -172,7 +172,7 @@ async function status(file) {
   const local = readFileSync(file, 'utf8');
   const c = await call(`/docs/${link.id}/content`, { key: link.key, site: link.url });
   const mine = local !== link.base, theirs = c.seq !== link.seq;
-  return { file, id: link.id, local_changes: mine, remote_changes: theirs, seq: link.seq, remote_seq: c.seq, url: docUrl(link.url, link.id, link.key), expires_at: link.expires_at,
+  return { file, id: link.id, local_changes: mine, remote_changes: theirs, seq: link.seq, remote_seq: c.seq, url: docUrl(link.url, link.id), ...(link.key ? { key_in: sidecar(file) } : {}), expires_at: link.expires_at,
     state: mine && theirs ? 'both changed: `keel pull` merges them, then push' : mine ? 'changed locally: push to send' : theirs ? 'changed remotely: pull to update' : 'up to date' };
 }
 
@@ -324,7 +324,7 @@ async function cli(argv) {
         return;
       }
       const link = readLink(resolve(args[0]));
-      console.log(`Sent. Now at seq ${r.seq}: ${docUrl(link.url, link.id, link.key)}`);
+      console.log(`Sent. Now at seq ${r.seq}: ${docUrl(link.url, link.id)}`);
       if (r.merged) console.log(`Someone else changed it meanwhile; merged, and ${r.file} now holds the merged design.`);
       showConflicts(r.conflicts);
       return;

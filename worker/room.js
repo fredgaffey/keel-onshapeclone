@@ -140,7 +140,9 @@ export class DocRoom {
         try { const d = JSON.parse(out); named = autoName(d); if (named) out = JSON.stringify(d, null, 2); } catch { /* left as sent */ }
       }
       const result = { merged: !!merged, conflicts: merged?.details || [], ...(merged || named ? { text: out, auto_named: named } : {}) };
-      if (out === head.text) return Response.json({ seq: head.seq, unchanged: true, ...result });
+      const same = (x, y) => { try { return JSON.stringify(JSON.parse(x)) === JSON.stringify(JSON.parse(y)); } catch { return x === y; } };
+      if (same(out, head.text)) return Response.json({ seq: head.seq, unchanged: true, ...result });
+      if (merged) result.merged_with = head.by;
       await this.agentSeen(user, 'editing', true);
       const next = await this.store(out, user, docId);
       this.broadcast({ type: 'remote', seq: next.seq, text: out, by: user?.name || null });
@@ -152,8 +154,12 @@ export class DocRoom {
       const { edits } = await request.json();
       const head = await this.load();
       let r;
-      try { r = applyEdits(head.text, user?.agent && !edits?.some?.((e) => e?.op === 'auto_name') ? [...edits, { op: 'auto_name' }] : edits); } catch (e) { return Response.json({ error: e.message, seq: head.seq }, { status: 400 }); }
-      if (r.done[r.done.length - 1] === 'every feature already has a name' && !edits.some((e) => e?.op === 'auto_name')) r.done.pop();
+      try { r = applyEdits(head.text, edits); } catch (e) { return Response.json({ error: e.message, seq: head.seq }, { status: 400 }); }
+      if (user?.agent) {
+        const d = JSON.parse(r.text);
+        const n = autoName(d);
+        if (n) { r.text = JSON.stringify(d, null, 2); r.done.push(`${n} feature${n > 1 ? 's' : ''} named`); }
+      }
       if (r.text.length > MAX_TEXT) return Response.json({ error: 'Design too large.' }, { status: 413 });
       if (r.text === head.text) return Response.json({ seq: head.seq, unchanged: true, done: r.done });
       await this.agentSeen(user, 'editing', true);
@@ -171,7 +177,7 @@ export class DocRoom {
       const head = await this.load();
       if (!Number.isInteger(since) || since < 0 || since > head.seq) return Response.json({ error: `since must be a seq from 0 to ${head.seq}.` }, { status: 400 });
       if (since === head.seq) return Response.json({ since, seq: head.seq, summary: 'no changes' });
-      const from = await this.ctx.storage.get(`hist:${since}`);
+      const from = since === 0 ? JSON.stringify({ features: [], params: [] }) : await this.ctx.storage.get(`hist:${since}`);
       if (typeof from !== 'string') return Response.json({ error: `Version ${since} is too old to compare (the last ${HISTORY} changes are kept). Read the document instead.`, seq: head.seq }, { status: 410 });
       return Response.json({ since, seq: head.seq, by: head.by, ...diffDesigns(from, head.text) });
     }
@@ -182,6 +188,8 @@ export class DocRoom {
       const { calls, at_seq, timeout_ms } = await request.json();
       const bad = checkCalls(calls);
       if (bad) return Response.json({ error: bad }, { status: 400 });
+      const now = (await this.load()).seq;
+      if (Number.isInteger(at_seq) && at_seq > now) return Response.json({ error: `There is no version ${at_seq} yet; the document is at ${now}.` }, { status: 400 });
       const writes = calls.some((c) => WRITE_METHODS.has(c.method));
       if (writes && request.headers.get('x-role') !== 'edit') return Response.json({ error: 'You can view this document but not edit it.' }, { status: 403 });
       const hosts = this.ctx.getWebSockets().filter((ws) => {
@@ -207,6 +215,11 @@ export class DocRoom {
       const out = await answer;
       this.runs.delete(rid);
       return Response.json({ ...out, host: pick.deserializeAttachment().user.name }, { status: out.timeout ? 504 : 200 });
+    }
+    if (url.pathname === '/renamed' && request.method === 'POST') {
+      const { name } = await request.json();
+      this.broadcast({ type: 'renamed', name, by: user?.name || null });
+      return Response.json({ ok: true });
     }
     if (url.pathname === '/seen' && request.method === 'POST') {
       await this.agentSeen(user, (await request.json().catch(() => ({}))).activity || 'reading', false);
@@ -330,6 +343,7 @@ function checkCalls(calls) {
   for (const c of calls) {
     if (!c || typeof c.method !== 'string') return 'Each call needs a method.';
     if (!READ_METHODS.has(c.method) && !WRITE_METHODS.has(c.method)) return `"${c.method}" isn't available to agents. Methods: ${[...READ_METHODS, ...WRITE_METHODS].join(', ')}.`;
+    if (c.method === 'engine.batch' && (c.params?.commands || []).length > 500) return 'At most 500 commands in one batch; split it.';
     const cmds = c.method === 'engine.execute' ? [c.params?.command ?? c.params?.id] : c.method === 'engine.batch' ? (c.params?.commands || []).map((x) => x?.command ?? x?.id) : [];
     for (const id of cmds) {
       if (typeof id !== 'string') return `${c.method} needs a command id.`;

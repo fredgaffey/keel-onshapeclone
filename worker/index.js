@@ -88,7 +88,14 @@ async function body(request) {
   if (len > MAX_BODY) throw new HttpError(413, 'Too large.');
   const text = await request.text();
   if (text.length > MAX_BODY) throw new HttpError(413, 'Too large.');
-  try { return JSON.parse(text || '{}'); } catch { throw new HttpError(400, 'Invalid JSON.'); }
+  let v;
+  try { v = JSON.parse(text || '{}'); } catch { throw new HttpError(400, 'Invalid JSON.'); }
+  if (!v || typeof v !== 'object' || Array.isArray(v)) throw new HttpError(400, 'Send a JSON object.');
+  // Fields that must be text when given: a number or object here is a client bug, not a name.
+  for (const k of ['name', 'text', 'email', 'password', 'by', 'base_text']) {
+    if (v[k] !== undefined && v[k] !== null && typeof v[k] !== 'string') throw new HttpError(400, `\`${k}\` must be text.`);
+  }
+  return v;
 }
 
 function sameOrigin(request, url) {
@@ -108,6 +115,8 @@ async function api(request, env, url) {
     return json({ user }, 201, { 'set-cookie': await startSession(env, user.id, secure) });
   }
   if (path === '/login' && method === 'POST') {
+    const ip = request.headers.get('cf-connecting-ip') || 'local';
+    if (env.LOGIN_LIMIT && !(await env.LOGIN_LIMIT.limit({ key: ip })).success) throw new HttpError(429, 'Too many sign-in attempts from here. Wait a minute and try again.');
     const { email, password } = await body(request);
     const user = await checkPassword(env, email, password);
     return json({ user }, 200, { 'set-cookie': await startSession(env, user.id, secure) });
@@ -174,7 +183,12 @@ async function api(request, env, url) {
   if (path === '/tokens' || path.startsWith('/tokens/')) {
     if (user.via === 'token') throw new HttpError(403, 'Manage API tokens from the Keel website, not with a token.');
     if (path === '/tokens' && method === 'GET') return json({ tokens: await listTokens(env, user.id) });
-    if (path === '/tokens' && method === 'POST') return json({ token: await createToken(env, user.id, await body(request)) }, 201);
+    if (path === '/tokens' && method === 'POST') {
+      const b = await body(request);
+      if (b.scope !== undefined && b.scope !== 'read' && b.scope !== 'write') throw new HttpError(400, '`scope` is "read" or "write".');
+      if (b.days !== undefined && (!Number.isInteger(b.days) || b.days < 0)) throw new HttpError(400, '`days` is a whole number of days (0: never expires).');
+      return json({ token: await createToken(env, user.id, { name: cleanName(b.name), scope: b.scope, days: b.days }) }, 201);
+    }
     const t = /^\/tokens\/([A-Za-z0-9]+)$/.exec(path);
     if (t && method === 'DELETE') { await revokeToken(env, user.id, t[1]); return json({ ok: true }); }
     throw new HttpError(404, 'Not found.');
@@ -228,6 +242,7 @@ async function api(request, env, url) {
     const name = cleanName((await body(request)).name);
     if (!name) throw new HttpError(400, 'Give it a name.');
     await env.DB.prepare('UPDATE documents SET name = ? WHERE id = ?').bind(name, docId).run();
+    await stub.fetch('https://room/renamed', { method: 'POST', body: JSON.stringify({ name }) });
     return json({ ok: true, name });
   }
   if (sub === '' && method === 'DELETE') {
@@ -341,8 +356,9 @@ function room(env, docId, user, role) {
   };
 }
 
+// Control characters, and the bidirectional overrides that make a name display as other text.
 function cleanName(name) {
-  return String(name || '').replace(/[\u0000-\u001f]/g, '').trim().slice(0, 120);
+  return String(name || '').replace(/[\u0000-\u001f\u007f\u202a-\u202e\u2066-\u2069\u200e\u200f]/g, '').trim().slice(0, 120);
 }
 
 function checkDesign(text) {

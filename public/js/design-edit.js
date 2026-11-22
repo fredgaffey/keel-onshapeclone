@@ -21,7 +21,7 @@ const UNIT_RE = /^(mm|deg|)$/;
 
 export function applyEdits(text, edits) {
   if (!Array.isArray(edits) || !edits.length) throw new Error('Give a list of edits.');
-  if (edits.length > 500) throw new Error('At most 500 edits at once.');
+  if (edits.filter((e) => e?.op !== 'auto_name').length > 500) throw new Error('At most 500 edits at once.');
   const d = JSON.parse(text);
   d.features ||= [];
   d.params ||= [];
@@ -61,7 +61,7 @@ export function nameFromType(type) {
   return s ? s[0].toUpperCase() + s.slice(1) : 'Feature';
 }
 
-function setPath(obj, path, value) {
+function setPath(obj, path, value, create = false) {
   const keys = Array.isArray(path) ? path : String(path).split('.').map((k) => (/^\d+$/.test(k) ? Number(k) : k));
   if (!keys.length || keys.some((k) => k === '' || k === '__proto__' || k === 'constructor' || k === 'prototype')) throw new Error('Bad path.');
   if (keys[0] === 'id') throw new Error('A feature\'s id can\'t change.');
@@ -71,6 +71,10 @@ function setPath(obj, path, value) {
     o = o[k];
   }
   const last = keys[keys.length - 1];
+  if (!(last in o) && !create && value !== undefined) {
+    const have = Object.keys(o).filter((k) => k !== 'id').slice(0, 30).join(', ');
+    throw new Error(`"${keys.join('.')}" isn't a field of this feature (it has: ${have}). Check the spelling, or pass create: true to add a new field.`);
+  }
   const before = o[last];
   // Dimensions are expression strings ("12", "width / 2"); a bare number written over one is meant
   // as that expression, and the modeller refuses a number there.
@@ -85,6 +89,7 @@ function applyOne(d, e) {
       const name = String(e.name || '').trim();
       if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(name)) throw new Error('A parameter name is letters, digits and _, starting with a letter.');
       if (e.expr === undefined || e.expr === null || String(e.expr).trim() === '') throw new Error('Give expr, e.g. "25 mm" or "width / 2".');
+      checkExpr(String(e.expr), d, name);
       const p = d.params.find((x) => x.name === name);
       const unit = e.unit ?? p?.unit ?? guessUnit(String(e.expr));
       if (!UNIT_RE.test(unit)) throw new Error('unit is "mm", "deg" or "" (none).');
@@ -100,6 +105,8 @@ function applyOne(d, e) {
     case 'delete_parameter': {
       const i = d.params.findIndex((x) => x.name === e.name);
       if (i < 0) throw new Error(`No parameter "${e.name}".`);
+      const users = usersOf(d, e.name);
+      if (users.length) throw new Error(`"${e.name}" is used by ${users.slice(0, 8).join(', ')}${users.length > 8 ? ', …' : ''}. Change those first (or set the parameter instead of deleting it).`);
       d.params.splice(i, 1);
       return `parameter ${e.name} deleted`;
     }
@@ -123,7 +130,7 @@ function applyOne(d, e) {
     }
     case 'set': {
       const f = findFeature(d, e.feature);
-      const before = setPath(f, e.path, e.value);
+      const before = setPath(f, e.path, e.value, !!e.create);
       return `feature ${f.id} "${f.name}" ${Array.isArray(e.path) ? e.path.join('.') : e.path}: ${JSON.stringify(before)} → ${JSON.stringify(e.value)}`;
     }
     case 'add': {
@@ -303,7 +310,8 @@ export function reviewDesign(text) {
   for (const f of feats) {
     const t = String(f.type).toLowerCase();
     if (!['box', 'cylinder', 'extrude', 'loft', 'revolve'].includes(t)) continue;
-    const key = JSON.stringify([t, f.length, f.width, f.height, f.radius, f.extent?.distance]);
+    if ((t === 'extrude' || t === 'revolve') && f.sketch === undefined) continue; // profiles differ; can't tell
+    const key = JSON.stringify([t, f.length, f.width, f.height, f.radius, f.extent?.distance, f.sketch, f.profiles]);
     sig.set(key, [...(sig.get(key) || []), f]);
   }
   const dupes = [...sig.values()].filter((g) => g.length >= 2 && g[0].type !== 'loft');
@@ -317,4 +325,53 @@ export function reviewDesign(text) {
     stats: { features: feats.length, parameters: userParams.length, dimensions: nDims, bodies: bodies.size },
     findings,
   };
+}
+
+
+// ---- expressions ----
+const UNITS = new Set(['mm', 'cm', 'm', 'um', 'in', 'ft', 'deg', 'rad', 'pi', 'PI', 'e']);
+const FUNCS = new Set(['sin', 'cos', 'tan', 'asin', 'acos', 'atan', 'atan2', 'sqrt', 'abs', 'min', 'max', 'floor', 'ceil', 'round', 'exp', 'ln', 'log', 'log10', 'pow', 'if', 'sign', 'hypot', 'mod']);
+const IDENT = /[A-Za-z_][A-Za-z0-9_]*/y;
+
+/** A quick well-formedness check of a parameter expression: tokens, operators and brackets in a
+ *  sensible order, and names that exist. The modeller has the last word; this catches typos. */
+export function checkExpr(expr, d, self = null) {
+  const known = new Set([...(d.params || []).map((p) => p.name), ...(d.features || []).flatMap((f) => f.param_names || [])]);
+  const toks = [];
+  for (let i = 0; i < expr.length;) {
+    const c = expr[i];
+    if (/\s/.test(c)) { i++; continue; }
+    const num = /(\d+\.?\d*|\.\d+)(e[+-]?\d+)?/iy; num.lastIndex = i;
+    if (/[\d.]/.test(c) && num.exec(expr)) { toks.push(['num']); i = num.lastIndex; continue; }
+    IDENT.lastIndex = i;
+    const id = IDENT.exec(expr);
+    if (id) { toks.push(['id', id[0]]); i = IDENT.lastIndex; continue; }
+    if ('+-*/^%'.includes(c)) { toks.push(['op', c]); i++; continue; }
+    if (c === '(' || c === ')' || c === ',') { toks.push([c]); i++; continue; }
+    if (c === '°') { toks.push(['id', 'deg']); i++; continue; }
+    throw new Error(`"${expr}": unexpected "${c}".`);
+  }
+  let depth = 0, prev = null;
+  for (const [k, v] of toks) {
+    if (k === 'op') {
+      if ((prev === null || prev === 'op' || prev === '(' || prev === ',') && v !== '-' && v !== '+') throw new Error(`"${expr}": "${v}" has nothing before it.`);
+    } else if (k === '(') depth++;
+    else if (k === ')') { if (--depth < 0 || prev === 'op' || prev === '(') throw new Error(`"${expr}": brackets don't match.`); }
+    else if (k === 'id' && !UNITS.has(v) && !FUNCS.has(v) && !known.has(v)) {
+      throw new Error(v === self ? `"${expr}": a parameter can't use itself.` : `"${expr}": no parameter "${v}". Parameters: ${[...known].filter((n) => !/^d\d+$/.test(n)).slice(0, 20).join(', ') || 'none yet'}.`);
+    }
+    prev = k === 'num' || k === 'id' ? 'val' : k;
+  }
+  if (depth !== 0) throw new Error(`"${expr}": brackets don't match.`);
+  if (prev === 'op' || prev === null) throw new Error(`"${expr}": it ends with an operator.`);
+}
+
+/** Features and parameters whose expressions name `param`. */
+export function usersOf(d, param) {
+  const re = new RegExp(`(^|[^A-Za-z0-9_])${param.replace(/[^A-Za-z0-9_]/g, '')}([^A-Za-z0-9_]|$)`);
+  const hits = [];
+  const walk = (v) => (typeof v === 'string' ? re.test(v) : v && typeof v === 'object' ? Object.entries(v).some(([k, x]) => k !== 'name' && walk(x)) : false);
+  for (const p of d.params || []) if (p.name !== param && re.test(String(p.expr))) hits.push(`parameter ${p.name}`);
+  for (const f of d.features || []) if (walk({ ...f, name: undefined })) hits.push(`${f.id} ${f.name}`);
+  return hits;
 }

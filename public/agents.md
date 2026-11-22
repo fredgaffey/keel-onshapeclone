@@ -84,14 +84,16 @@ claude mcp add --transport http keel-loose https://keel.pebnum.com/mcp/loose
 | `read_document` | ✓ | ✓ | Design JSON and its `seq` |
 | `write_document` | ✓ | ✓ | Save a design from `base_seq`, merging with changes made since |
 | `create_document` | ✓ | ✓ | New document; `loose: true` (or no token) makes a loose one |
-| `edit_document` | ✓ | ✓ | Typed edits; never conflicts; `check: true` rebuilds it with the kernel |
+| `edit_document` | ✓ | ✓ | Typed edits, including `auto_name`; never conflicts; `check: true` rebuilds it with the kernel |
+| `review_design` | ✓ | ✓ | Marks the design like a CAD reviewer (names, parameters, repeats, placements) |
 | `get_changes` | ✓ | ✓ | What changed since a seq: added, removed, renamed, each field before and after |
 | `describe_format`, `list_commands` | ✓ | ✓ | The format reference: tested examples and the commands' parameters |
 | `inspect_model` ⚙ | ✓ | ✓ | Kernel rebuild check: errors per feature, bodies, volumes (`measure`) |
 | `screenshot` ⚙ | ✓ | ✓ | The model as the modeller draws it, from any view |
 | `run_commands` ⚙ | ✓ | ✓ | SolidCraft commands, run as one batch that rolls back on failure |
 | `start_host` | | ✓ | Opens a headless browser tab for the ⚙ tools |
-| `save_version`, `list_versions` | ✓ | ✓ | Named versions, which can be restored on the website |
+| `merge_files` | | ✓ | Three-way merge of local files: base, mine and theirs |
+| `save_version`, `list_versions`, `restore_version` | ✓ | ✓ | Named versions; restore puts one back (keeping the current state as a version first) |
 | `pull_document` | | ✓ | Document to a linked local `.sc` file; merges local changes onto newer ones |
 | `push_document` | | ✓ | Linked file back to the document, merged |
 | `file_status` | | ✓ | Whether the file, the document, or both have changed |
@@ -104,7 +106,6 @@ commands there.
 Agents show among the people on a document while they work. Before an agent's first change after
 10 minutes idle, Keel saves a version named "Before <agent>'s changes", so one restore undoes the
 whole session.
-| `merge_files` | | ✓ | Three-way merge of local files: base, mine and theirs |
 
 ## Merging and conflicts
 

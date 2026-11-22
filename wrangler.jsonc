@@ -12,7 +12,10 @@
   // Hourly: delete loose documents past their deletion date (LOOSE_DAYS).
   "triggers": { "crons": ["17 * * * *"] },
   // Loose documents can be made without an account, so limit how fast one address can make them.
-  "ratelimits": [{ "name": "LOOSE_LIMIT", "namespace_id": "1001", "simple": { "limit": 10, "period": 60 } }],
+  "ratelimits": [
+    { "name": "LOOSE_LIMIT", "namespace_id": "1001", "simple": { "limit": 10, "period": 60 } },
+    { "name": "LOGIN_LIMIT", "namespace_id": "1002", "simple": { "limit": 10, "period": 60 } }
+  ],
   "assets": {
     "directory": "./public",
     "binding": "ASSETS",

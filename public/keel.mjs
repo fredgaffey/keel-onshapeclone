@@ -319,7 +319,7 @@ const TOOLS = [
       'Create a document, empty or from design JSON. With an account token it goes in your documents. ' +
       'With loose: true, or without signing in, it is a loose document: no account, and the result has a key (keel_...) ' +
       'that is the only way back in. Keep the key (it is a password for that document, and is shown once), for example next to your local copy. ' +
-      `Loose documents lapse after 90 days unused. ${DESIGN_NOTE}`,
+      `Loose documents are deleted a set number of days after they are made (30 on keel.pebnum.com; the result gives the date). ${DESIGN_NOTE}`,
     inputSchema: {
       type: 'object',
       properties: { name: { type: 'string' }, design: { type: 'string' }, loose: { type: 'boolean' }, by: { type: 'string', description: 'For loose documents: the name shown to people who open it, e.g. "Claude".' } },
@@ -331,7 +331,8 @@ const TOOLS = [
     description:
       'Make small typed changes without sending the whole design. Applied to the current design, so they never conflict. Edits run in order; features are named by id or exact name. Ops: ' +
       'set_parameter {name, expr ("25 mm", "width / 2"), unit?}, delete_parameter {name}, rename {feature, name}, suppress {feature, suppressed?}, delete {feature}, ' +
-      'set {feature, path ("depth" or "extent.distance"), value}, add {feature: {type, name?, ...fields}, after?} (id and a unique name are filled in), move {feature, after}, rename_design {name}. ' +
+      'set {feature, path ("depth" or "extent.distance"), value, create?} (an unknown path is refused unless create: true), add {feature: {type, name?, ...fields}, after?} (id and a unique name are filled in), move {feature, after}, rename_design {name}, auto_name {} (names features still called "Box3" from what they do). ' +
+      'Parameter expressions are checked (names must exist; "+*" is refused), and a parameter in use can\'t be deleted. ' +
       'check: true then rebuilds it in a browser tab with the real kernel and reports errors (needs a tab open on the document; see inspect_model).',
     inputSchema: {
       type: 'object',
@@ -355,14 +356,14 @@ const TOOLS = [
     name: 'inspect_model',
     description:
       'Rebuild check by the real modelling kernel: each feature with its error or warning, the bodies, parameters, and optionally volumes and areas (measure: true). ' +
-      'Runs in a browser tab that has the document open with agents allowed (on by default), or one started with `keel host`. Pass at_seq (from a write) to inspect that version.',
-    inputSchema: { type: 'object', properties: { id: ID, measure: { type: 'boolean' }, at_seq: { type: 'integer' } }, required: ['id'] },
+      'Runs in a browser tab that has the document open with agents allowed (on by default), or one started with `keel host`. at_seq (from a write) waits until the tab has at least that version. params: true includes the parameters and their values.',
+    inputSchema: { type: 'object', properties: { id: ID, measure: { type: 'boolean' }, at_seq: { type: 'integer' }, params: { type: 'boolean' } }, required: ['id'] },
     annotations: { readOnlyHint: true },
   },
   {
     name: 'screenshot',
-    description: 'A picture of the model as rendered by the modeller, from a browser tab on the document (see inspect_model). view: iso, front, back, top, bottom, left, right, home or fit.',
-    inputSchema: { type: 'object', properties: { id: ID, view: { type: 'string', enum: ['iso', 'front', 'back', 'top', 'bottom', 'left', 'right', 'home', 'fit'] }, at_seq: { type: 'integer' } }, required: ['id'] },
+    description: 'A picture of the model as rendered by the modeller, from a browser tab on the document (see inspect_model). view (iso, front, back, top, bottom, left, right, home, fit) turns to that view and frames the model; without it, the view as it is. The picture is the 3D view only; chrome: true includes the app around it. at_seq waits until the tab has at least that version (it always shows the latest).',
+    inputSchema: { type: 'object', properties: { id: ID, view: { type: 'string', enum: ['iso', 'front', 'back', 'top', 'bottom', 'left', 'right', 'home', 'fit'] }, at_seq: { type: 'integer' }, chrome: { type: 'boolean' } }, required: ['id'] },
     annotations: { readOnlyHint: true },
   },
   {
@@ -393,6 +394,11 @@ const TOOLS = [
     name: 'save_version',
     description: 'Save a named version of a document, which can be restored from the Versions panel. Good before and after a large change.',
     inputSchema: { type: 'object', properties: { id: ID, name: { type: 'string' } }, required: ['id', 'name'] },
+  },
+  {
+    name: 'restore_version',
+    description: 'Put a document back to a saved version (from list_versions): everyone sees it at once. The current state is kept as a new version first, so this can be undone too.',
+    inputSchema: { type: 'object', properties: { id: ID, version: { type: 'string', description: 'The version id from list_versions.' } }, required: ['id', 'version'] },
   },
   {
     name: 'list_versions',
@@ -440,6 +446,7 @@ async function runTool(ctx, name, a = {}) {
       return `Document "${doc.name}" (id ${t.id}, seq ${c.seq}, your role: ${doc.role}, last changed by ${c.by || 'unknown'}). Pass base_seq ${c.seq} when writing.\n${c.text}`;
     }
     case 'write_document': {
+      if (a.design && typeof a.design === 'object') a.design = JSON.stringify(a.design, null, 2);
       checkDesign(a.design);
       const t = await target(ctx, a.id);
       if (!Number.isInteger(a.base_seq)) throw new Error('Give base_seq: the seq you read the design at (read_document shows it).');
@@ -466,7 +473,7 @@ async function runTool(ctx, name, a = {}) {
       const check = a.check ? await inspect(ctx, t, { at_seq: r.seq }).catch((e) => ({ unavailable: e.message })) : undefined;
       return {
         saved: !r.unchanged, seq: r.seq, merged: r.merged, conflicts: r.conflicts, ...(check ? { check } : {}),
-        ...(r.merged ? { note: 'Others changed the design meanwhile; their changes were merged in. read_document shows the result.' } : {}),
+        ...(r.merged ? { note: `The document changed after version ${a.base_seq}${r.merged_with ? ` (last by ${r.merged_with})` : ''}; those changes were merged with yours. read_document shows the result.` } : {}),
         url: openUrl(ctx, t.id, t.key),
       };
     }
@@ -503,7 +510,7 @@ async function runTool(ctx, name, a = {}) {
     }
     case 'screenshot': {
       const t = await target(ctx, a.id);
-      const r = await run(ctx, t, [{ method: 'keel.screenshot', params: { view: a.view } }], a.at_seq);
+      const r = await run(ctx, t, [{ method: 'keel.screenshot', params: { view: a.view, chrome: !!a.chrome } }], a.at_seq);
       const shot = r.results[0];
       return { __content: [{ type: 'image', data: shot.image, mimeType: shot.mime }, { type: 'text', text: `${shot.width}×${shot.height}, document seq ${r.seq}, from ${r.host}'s tab.` }] };
     }
@@ -536,7 +543,11 @@ async function runTool(ctx, name, a = {}) {
         // Name what the commands made (where the agent didn't): applied by the room, merged live.
         await ctx.call(`/docs/${t.id}/edit`, { method: 'POST', body: { edits: [{ op: 'auto_name' }] }, key: t.key }).catch(() => {});
       }
-      const text = { ok: r.ok && !batch?.failed, seq: r.seq, saved: r.saved, completed: batch?.completed, failed: batch?.failed || r.failed || undefined, results: batch?.results };
+      const failed = batch?.failed || r.failed;
+      const brief = (x) => (x && typeof x === 'object' ? Object.fromEntries(['feature', 'name', 'bodies', 'created_bodies', 'removed_bodies', 'warning'].filter((k) => x[k] !== undefined && x[k] !== null && !(Array.isArray(x[k]) && !x[k].length)).map((k) => [k, x[k]])) : x);
+      const text = failed
+        ? { ok: false, rolled_back: true, failed, note: 'Nothing was kept: the whole batch was undone. Fix the failing command and run the batch again.', seq: r.seq }
+        : { ok: !!r.ok, seq: r.seq, saved: r.saved, completed: batch?.completed, results: (batch?.results || []).map(brief), ...(r.error ? { error: r.error } : {}) };
       const shot = r.results[1];
       if (shot?.image) return { __content: [{ type: 'text', text: JSON.stringify(text, null, 2) }, { type: 'image', data: shot.image, mimeType: shot.mime }] };
       return text;
@@ -544,6 +555,11 @@ async function runTool(ctx, name, a = {}) {
     case 'save_version': {
       const t = await target(ctx, a.id);
       return ctx.call(`/docs/${t.id}/versions`, { method: 'POST', body: { name: a.name }, key: t.key });
+    }
+    case 'restore_version': {
+      const t = await target(ctx, a.id);
+      await ctx.call(`/docs/${t.id}/versions`, { method: 'POST', body: { name: 'Before restoring a version' }, key: t.key }).catch(() => {});
+      return ctx.call(`/docs/${t.id}/versions/${encodeURIComponent(a.version)}/restore`, { method: 'POST', body: {}, key: t.key });
     }
     case 'list_versions': {
       const t = await target(ctx, a.id);
@@ -568,7 +584,7 @@ async function run(ctx, t, calls, at_seq = null, { allowFail = false } = {}) {
   return r;
 }
 
-async function inspect(ctx, t, { measure = false, at_seq = null } = {}) {
+async function inspect(ctx, t, { measure = false, at_seq = null, params = false } = {}) {
   const r = await run(ctx, t, [{ method: 'document.inspect', params: { timeline: 'summary', bodies: measure ? true : 'names', measure: !!measure } }], at_seq, { allowFail: true });
   if (r.opens === false) return { seq: r.seq, rebuilds: false, opens: false, error: r.error, next: 'Fix the design (or write the previous one back), then check again.' };
   if (!r.ok) throw new Error(r.error || 'The browser tab could not inspect the model.');
@@ -581,7 +597,7 @@ async function inspect(ctx, t, { measure = false, at_seq = null } = {}) {
     problems,
     features: timeline.map((f) => `${f.id} ${f.name} (${f.type})${f.suppressed ? ' suppressed' : ''}${f.rolled_back ? ' rolled back' : ''}`),
     bodies: d.bodies,
-    params: d.params,
+    ...(params ? { params: d.params } : {}),
     units: d.units,
   };
 }
@@ -753,7 +769,7 @@ async function status(file) {
   const local = readFileSync(file, 'utf8');
   const c = await call(`/docs/${link.id}/content`, { key: link.key, site: link.url });
   const mine = local !== link.base, theirs = c.seq !== link.seq;
-  return { file, id: link.id, local_changes: mine, remote_changes: theirs, seq: link.seq, remote_seq: c.seq, url: docUrl(link.url, link.id, link.key), expires_at: link.expires_at,
+  return { file, id: link.id, local_changes: mine, remote_changes: theirs, seq: link.seq, remote_seq: c.seq, url: docUrl(link.url, link.id), ...(link.key ? { key_in: sidecar(file) } : {}), expires_at: link.expires_at,
     state: mine && theirs ? 'both changed: `keel pull` merges them, then push' : mine ? 'changed locally: push to send' : theirs ? 'changed remotely: pull to update' : 'up to date' };
 }
 
@@ -905,7 +921,7 @@ async function cli(argv) {
         return;
       }
       const link = readLink(resolve(args[0]));
-      console.log(`Sent. Now at seq ${r.seq}: ${docUrl(link.url, link.id, link.key)}`);
+      console.log(`Sent. Now at seq ${r.seq}: ${docUrl(link.url, link.id)}`);
       if (r.merged) console.log(`Someone else changed it meanwhile; merged, and ${r.file} now holds the merged design.`);
       showConflicts(r.conflicts);
       return;

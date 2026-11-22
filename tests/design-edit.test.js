@@ -66,3 +66,17 @@ test('review flags what a reviewer would, and passes a tidy design', () => {
   const tidy = JSON.stringify({ format: 'solidcraft/57', params: [{ name: 't', expr: '3 mm', unit: 'mm', model: false }], features: [{ id: 1, name: 'Base plate', type: 'box', length: 't', param_names: ['d1'] }] });
   assert.equal(reviewDesign(tidy).score, 100);
 });
+
+test('edits refuse typos, bad expressions and deleting a parameter in use', () => {
+  const d = JSON.stringify({ format: 'solidcraft/57', params: [{ name: 'tube_d', expr: '25.4 mm', unit: 'mm', model: false }], features: [
+    { id: 1, name: 'Bore', type: 'cylinder', radius: 'tube_d / 2', extent: { distance: '5' }, param_names: ['d1'] },
+  ], next_id: 2 });
+  assert.throws(() => applyEdits(d, [{ op: 'set', feature: 1, path: 'extent.distanse', value: '3' }]), /isn't a field of this feature \(it has: distance\)/);
+  assert.ok(applyEdits(d, [{ op: 'set', feature: 1, path: 'note', value: 'x', create: true }]).text.includes('"note"'));
+  assert.throws(() => applyEdits(d, [{ op: 'set_parameter', name: 'w', expr: 'foo +* 3' }]), /"\*" has nothing before it|no parameter "foo"/);
+  assert.throws(() => applyEdits(d, [{ op: 'set_parameter', name: 'w', expr: '(tube_d + 2' }]), /brackets/);
+  assert.throws(() => applyEdits(d, [{ op: 'set_parameter', name: 'w', expr: 'wall * 2' }]), /no parameter "wall"/);
+  assert.ok(applyEdits(d, [{ op: 'set_parameter', name: 'w', expr: '-tube_d / 2 + max(3 mm, d1) * sin(30 deg)' }]));
+  assert.throws(() => applyEdits(d, [{ op: 'delete_parameter', name: 'tube_d' }]), /used by 1 Bore/);
+  assert.ok(applyEdits(d, Array.from({ length: 500 }, () => ({ op: 'suppress', feature: 1 }))), '500 edits are allowed');
+});

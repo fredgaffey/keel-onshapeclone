@@ -81,11 +81,7 @@ async function boot() {
       return;
     }
     if (e.status === 401) return location.replace('/');
-    if (e.status === 404 && !isLocalOnly) {
-      $('loading-text').textContent = e.message;
-      $('loading').querySelector('.spinner').remove();
-      return;
-    }
+    if (e.status === 404 && !isLocalOnly) return deadEnd(e.message);
     if (!kept) throw new Error('you\'re offline and this document isn\'t on this device');
     S.name = kept.name;
     S.role = kept.role === 'view' ? 'view' : 'edit';
@@ -197,6 +193,12 @@ async function tick() {
     await reconcile(m.text, m.seq, m.by);
   }
   await readEngine();
+  // A viewer's own changes are never saved: put the document back as it is, rather than leave
+  // them looking at a model nobody else has.
+  if (S.role === 'view' && S.base !== null && S.known !== S.base && !(await busyEditing())) {
+    await load(S.base);
+    toast('View only: your change was undone. Ask the owner for edit access to change this document.', 'info', 6000);
+  }
   if (S.role === 'edit' && S.connected && !S.inflight && S.base !== null && S.known !== S.base && !isLocalOnly) {
     const id = ++S.version;
     S.inflight = { id, text: S.known };
@@ -308,6 +310,8 @@ function connect() {
 
 // The browser knows the network went away before the socket does.
 window.addEventListener('offline', () => S.ws && S.ws.close());
+// Back online with the modeller never loaded (it wasn't on this device yet): start again now.
+window.addEventListener('online', () => { if (!S.cad && $('loading') && !$('loading').hidden) location.reload(); });
 
 function send(msg) {
   if (S.ws && S.ws.readyState === WebSocket.OPEN) S.ws.send(JSON.stringify(msg));
@@ -361,6 +365,12 @@ async function onMessage(msg) {
     case 'peers':
       S.peers = msg.peers;
       renderPeers();
+      break;
+    case 'renamed':
+      S.name = msg.name;
+      if (document.activeElement !== $('docname')) $('docname').value = msg.name;
+      document.title = `${msg.name} · Keel`;
+      persistSoon();
       break;
     case 'run':
       runForAgent(msg); // not awaited: it may wait for remote changes queued behind this message
@@ -452,7 +462,10 @@ async function runForAgent(msg) {
     const results = [];
     for (const [i, c] of msg.calls.entries()) {
       try {
-        results.push(c.method === 'keel.screenshot' ? await screenshot(c.params || {}) : await S.cad.request(c.method, c.params ?? {}));
+        const left = deadline - Date.now();
+        if (left < 1000) throw new Error('out of time');
+        const call = c.method === 'keel.screenshot' ? screenshot(c.params || {}) : S.cad.request(c.method, c.params ?? {});
+        results.push(await Promise.race([call, sleep(left).then(() => { throw new Error(`${c.method} didn't finish in time`); })]));
       } catch (e) {
         return { ok: false, results, failed: { index: i, method: c.method, error: e.message } };
       }
@@ -465,31 +478,61 @@ async function runForAgent(msg) {
   reply({ ...(out || { ok: false, error: 'The tab could not run that.' }), seq: S.seq, saved: S.known === S.base });
 }
 
-/** The viewport as a JPEG, at most `max` pixels wide (agents pay for pixels). */
-async function screenshot({ view, max = 1024, quality = 0.82 } = {}) {
-  if (view) await S.cad.request('ui.view', { view });
+/** The 3D view as a JPEG, at most `max` pixels wide (agents pay for pixels): a named view is
+ *  framed to fit, and the picture is cropped to the viewport (no ribbon or panels) unless `chrome`. */
+async function screenshot({ view, max = 1024, quality = 0.82, chrome = false } = {}) {
+  if (view) {
+    await S.cad.request('ui.view', { view });
+    if (view !== 'fit') await S.cad.request('ui.view', { view: 'fit' });
+  }
   const w = $('cad').contentWindow;
   const canvas = w.document.querySelector('canvas');
   if (!canvas) throw new Error('no viewport yet');
-  await new Promise((r) => w.requestAnimationFrame(() => w.requestAnimationFrame(r)));
+  const rect = chrome ? null : viewportRect(await S.cad.request('ui.inspect').catch(() => null), canvas);
   const stream = canvas.captureStream(30);
   const video = document.createElement('video');
+  const within = (p, ms, what) => Promise.race([p, sleep(ms).then(() => { throw new Error(`the screenshot timed out (${what})`); })]);
   try {
     video.muted = true;
     video.srcObject = stream;
-    await video.play();
-    await Promise.race([new Promise((r) => (video.requestVideoFrameCallback ? video.requestVideoFrameCallback(r) : setTimeout(r, 300))), sleep(3000)]);
-    const scale = Math.min(1, max / video.videoWidth);
+    // The modeller only draws when something changes, and a stream only has frames when it
+    // draws: nudge it with a pointer move over the canvas so there is a frame to take.
+    const nudge = () => {
+      const b = canvas.getBoundingClientRect();
+      canvas.dispatchEvent(new w.PointerEvent('pointermove', { bubbles: true, clientX: b.left + b.width / 2, clientY: b.top + b.height / 2, pointerType: 'mouse' }));
+    };
+    nudge();
+    await within(video.play(), 4000, 'no picture');
+    const nudger = setInterval(nudge, 150);
+    try {
+      await within(new Promise((r) => (video.requestVideoFrameCallback ? video.requestVideoFrameCallback(r) : setTimeout(r, 300))), 4000, 'no frame drawn');
+    } finally { clearInterval(nudger); }
+    const [sx, sy, sw, sh] = rect || [0, 0, video.videoWidth, video.videoHeight];
+    const scale = Math.min(1, max / sw);
     const c = document.createElement('canvas');
-    c.width = Math.round(video.videoWidth * scale);
-    c.height = Math.round(video.videoHeight * scale);
-    c.getContext('2d').drawImage(video, 0, 0, c.width, c.height);
+    c.width = Math.round(sw * scale);
+    c.height = Math.round(sh * scale);
+    c.getContext('2d').drawImage(video, sx, sy, sw, sh, 0, 0, c.width, c.height);
     const data = c.toDataURL('image/jpeg', quality);
     return { image: data.slice(data.indexOf(',') + 1), mime: 'image/jpeg', width: c.width, height: c.height };
   } finally {
     stream.getTracks().forEach((t) => t.stop());
     video.srcObject = null;
   }
+}
+
+/** The 3D viewport inside the app, in the canvas's pixels: [x, y, w, h], or null. */
+function viewportRect(ui, canvas) {
+  const v = ui && (ui.viewport_rect || ui.viewport?.rect || ui.viewport);
+  let r = null;
+  if (Array.isArray(v) && v.length === 4) r = v;
+  else if (v && Array.isArray(v.min) && Array.isArray(v.max)) r = [v.min[0], v.min[1], v.max[0] - v.min[0], v.max[1] - v.min[1]];
+  else if (v && ['x', 'y', 'w', 'h'].every((k) => typeof v[k] === 'number')) r = [v.x, v.y, v.w, v.h];
+  else if (v && ['x', 'y', 'width', 'height'].every((k) => typeof v[k] === 'number')) r = [v.x, v.y, v.width, v.height];
+  if (!r || !(r[2] > 10 && r[3] > 10)) return null;
+  const k = canvas.width / (canvas.clientWidth || canvas.width); // UI points to canvas pixels
+  const px = r.map((n) => Math.round(n * k));
+  return px[0] + px[2] <= canvas.width + 2 && px[1] + px[3] <= canvas.height + 2 ? px : null;
 }
 
 let flashTimer = null;
@@ -506,6 +549,14 @@ function flashAgent(by) {
 export function setAgentHost(on) {
   try { localStorage.setItem('keel-agent-host', on ? 'on' : 'off'); } catch {}
   send({ type: 'host', on, dedicated: dedicatedHost });
+}
+
+/** The document can't be opened here (deleted, or not shared): say so plainly, with a way out. */
+function deadEnd(message) {
+  for (const b of document.querySelectorAll('.bar .btn, #status, #agentnote')) b.hidden = true;
+  $('cad').hidden = true;
+  $('loading').innerHTML = `<div class="box"><p style="font-size:16px;margin:0 0 10px">${esc(message)}</p><a class="btn primary" href="/">All documents</a></div>`;
+  $('loading').hidden = false;
 }
 
 function banner(text) {
@@ -535,9 +586,10 @@ function wireBar() {
     const name = nameInput.value.trim();
     if (!name || name === S.name) { nameInput.value = S.name; return; }
     try {
-      await api(`/docs/${docId}`, { method: 'PATCH', body: { name } });
-      S.name = name;
-      document.title = `${name} · Keel`;
+      const r = await api(`/docs/${docId}`, { method: 'PATCH', body: { name } });
+      S.name = r.name || name; // as the server kept it (it trims and shortens names)
+      nameInput.value = S.name;
+      document.title = `${S.name} · Keel`;
     } catch (e) { toast(e.message, 'error'); nameInput.value = S.name; }
   };
   nameInput.addEventListener('keydown', (e) => { if (e.key === 'Enter') nameInput.blur(); if (e.key === 'Escape') { nameInput.value = S.name; nameInput.blur(); } });

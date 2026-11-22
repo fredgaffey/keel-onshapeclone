@@ -143,7 +143,7 @@ function render() {
   const rows = docs.filter(filters[view]).filter((d) => !query || d.name.toLowerCase().includes(query));
   const list = document.getElementById('list');
   if (!rows.length) {
-    list.innerHTML = `<div class="empty">${query ? 'No documents match.' : view === 'shared' ? 'Nothing has been shared with you yet.' : 'No documents yet. Create one to start designing.'}</div>`;
+    list.innerHTML = `<div class="empty">${query ? 'No documents match.' : view === 'shared' ? 'Nothing has been shared with you yet.' : view === 'device' ? 'No documents are kept on this device yet. Use a document\'s ⋯ menu → Keep on device.' : 'No documents yet. Create one to start designing.'}</div>`;
     return;
   }
   list.innerHTML = `<table class="docs"><thead><tr><th>Name</th><th class="hide-narrow">Owner</th><th>Modified</th><th></th></tr></thead><tbody>
@@ -205,7 +205,7 @@ async function keep(d) {
 async function rename(d) {
   const name = await ask('Rename document', d.name, 'Rename');
   if (!name || name === d.name) return;
-  try { await api(`/docs/${d.id}`, { method: 'PATCH', body: { name } }); d.name = name; render(); } catch (e) { toast(e.message, 'error'); }
+  try { d.name = (await api(`/docs/${d.id}`, { method: 'PATCH', body: { name } })).name || name; render(); } catch (e) { toast(e.message, 'error'); }
 }
 
 async function remove(d) {
@@ -376,6 +376,8 @@ function ask(title, value, action) {
       <div class="actions"><button class="btn" value="cancel">Cancel</button><button class="btn primary" value="ok">${esc(action)}</button></div></form>`;
     document.body.append(dlg);
     const input = dlg.querySelector('input');
+    // Enter confirms (the form's first button is Cancel, which Enter would otherwise press).
+    input.addEventListener('keydown', (e) => { if (e.key === 'Enter') { e.preventDefault(); dlg.close('ok'); } });
     dlg.addEventListener('close', () => { resolve(dlg.returnValue === 'ok' ? input.value.trim() : null); dlg.remove(); });
     dlg.showModal();
     input.select();
