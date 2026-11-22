@@ -546,7 +546,9 @@ async function run(ctx, t, calls, at_seq = null, { allowFail = false } = {}) {
 }
 
 async function inspect(ctx, t, { measure = false, at_seq = null } = {}) {
-  const r = await run(ctx, t, [{ method: 'document.inspect', params: { timeline: 'summary', bodies: measure ? true : 'names', measure: !!measure } }], at_seq);
+  const r = await run(ctx, t, [{ method: 'document.inspect', params: { timeline: 'summary', bodies: measure ? true : 'names', measure: !!measure } }], at_seq, { allowFail: true });
+  if (r.opens === false) return { seq: r.seq, rebuilds: false, opens: false, error: r.error, next: 'Fix the design (or write the previous one back), then check again.' };
+  if (!r.ok) throw new Error(r.error || 'The browser tab could not inspect the model.');
   const d = r.results[0] || {};
   const timeline = d.timeline || [];
   const problems = timeline.filter((f) => f.error || f.warning).map((f) => ({ id: f.id, name: f.name, type: f.type, ...(f.error ? { error: f.error } : {}), ...(f.warning ? { warning: f.warning } : {}) }));
