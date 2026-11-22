@@ -1,6 +1,6 @@
 // Keel's service worker: the app shell and SolidCraft's files are cached so Keel opens offline.
 // The API is never cached; documents are kept on the device by the pages themselves (local.js).
-const SHELL = 'keel-shell-v3';
+const SHELL = 'keel-shell-v4';
 const CAD = 'keel-cad-v2';
 const SHELL_FILES = ['/', '/doc', '/css/keel.css', '/js/api.js', '/js/home.js', '/js/editor.js', '/js/local.js', '/js/merge.js', '/js/flexblade.js', '/js/scripts-panel.js', '/js/scripts/index.js', '/js/scripts/airfoil.js', '/js/scripts/propeller.js', '/img/keel.svg', '/manifest.webmanifest'];
 
