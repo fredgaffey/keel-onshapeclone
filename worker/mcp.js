@@ -4,7 +4,7 @@
 //   /mcp/loose  no account: loose documents only, made with create_document and reached by key.
 // Each tool call goes through Keel's own HTTP API (`api`), so access rules and merging are the same.
 
-import { TOOLS, DESIGN_NOTE, handleRpc } from '../public/js/agent-tools.js';
+import { TOOLS, DESIGN_NOTE, MODELLING_GUIDE, handleRpc } from '../public/js/agent-tools.js';
 import { looseDays } from './auth.js';
 import { cors, resourceMetadataUrl } from './oauth.js';
 
@@ -64,7 +64,7 @@ export async function mcp(request, env, url, api, { loose = false } = {}) {
     instructions:
       `Keel is collaborative CAD in the browser; these tools read and change Keel documents, which people may be editing live. ` +
       (signedIn ? 'You are signed in with an account token. ' : `You are not signed in: create_document makes a loose document (no account; it is deleted ${looseDays(env)} days after it is made) and returns a key to reach it. `) +
-      DESIGN_NOTE,
+      MODELLING_GUIDE + ' ' + DESIGN_NOTE,
   };
   const one = (m) => handleRpc(m, opts);
   const out = Array.isArray(msg) ? (await Promise.all(msg.map(one))).filter(Boolean) : await one(msg);

@@ -11,6 +11,15 @@
 //   asset(path) -> parsed JSON of a file the site serves (the format catalog),
 // }
 
+export const MODELLING_GUIDE =
+  'Model like a careful CAD engineer, not a script: ' +
+  '(1) set_parameter the driving sizes first and use them in expressions; ' +
+  '(2) give every feature a name for what it is ("Bore", "Blade clamp jaw"); ' +
+  '(3) sketch on planes and extrude or revolve, with operation "join"/"cut" onto the part, rather than placing boxes with move and combining; ' +
+  '(4) build a repeated or symmetric thing once, then pattern or mirror it; ' +
+  '(5) after each step, screenshot and inspect_model; ' +
+  '(6) before you finish, review_design and fix what it flags.';
+
 export const DESIGN_NOTE =
   'A design is SolidCraft JSON: {format, name, units, params:[{name, value...}], features:[{id, name, type, suppressed, ...}], next_id, ...}. ' +
   'Keep the format string as it is. New features take ids from next_id (then raise next_id), and each gets a short descriptive name ' +
@@ -80,6 +89,12 @@ export const TOOLS = [
     },
   },
   {
+    name: 'review_design',
+    description: 'Mark a design the way a CAD reviewer would, with a score: default feature names, no parameters, numbers typed into many features, computed placements, combine chains, shapes built twice instead of patterned. Each finding says how to fix it. Run it before you call a design done.',
+    inputSchema: { type: 'object', properties: { id: ID }, required: ['id'] },
+    annotations: { readOnlyHint: true },
+  },
+  {
     name: 'get_changes',
     description: 'What changed in a document since a seq (one of the last 50 changes): features added, removed and renamed, each changed field with before and after, and parameters. Much smaller than reading the whole design.',
     inputSchema: { type: 'object', properties: { id: ID, since_seq: { type: 'integer' } }, required: ['id', 'since_seq'] },
@@ -116,7 +131,7 @@ export const TOOLS = [
     description:
       'Model with SolidCraft\'s own commands, run by the real kernel in a browser tab on the document; the result syncs to everyone like a person\'s edit. ' +
       'commands: [{command, params}] (see list_commands), run as one batch: if one fails, the batch is undone (rollback) and the failure is returned. ' +
-      'Name what you make: most create commands take a name or body_name ("Mounting plate", not "Extrude1"). screenshot: a view name to get a picture afterwards.',
+      'Name what you make: most create commands take name and body_name ("Mounting plate", not "Extrude1"); anything left unnamed is named automatically from what it does. Use parameter expressions for sizes. screenshot: a view name to get a picture afterwards. ' + MODELLING_GUIDE,
     inputSchema: {
       type: 'object',
       properties: { id: ID, commands: { type: 'array', items: { type: 'object' } }, screenshot: { type: 'string' } },
@@ -223,6 +238,10 @@ export async function runTool(ctx, name, a = {}) {
       if (a.check && !r.unchanged) out.check = await inspect(ctx, t, { at_seq: r.seq }).catch((e) => ({ unavailable: e.message }));
       return out;
     }
+    case 'review_design': {
+      const t = await target(ctx, a.id);
+      return ctx.call(`/docs/${t.id}/review`, { key: t.key });
+    }
     case 'get_changes': {
       const t = await target(ctx, a.id);
       return ctx.call(`/docs/${t.id}/changes?since=${encodeURIComponent(a.since_seq)}`, { key: t.key });
@@ -249,7 +268,7 @@ export async function runTool(ctx, name, a = {}) {
       if (!topic) {
         const families = {};
         for (const c of cat.commands) { const fam = c.id.split('.')[0]; families[fam] = (families[fam] || 0) + 1; }
-        return { format: cat.format, note: DESIGN_NOTE, examples: Object.keys(cat.examples), command_families: families, next: 'describe_format with a topic shows examples; list_commands searches commands.' };
+        return { format: cat.format, how_to_model: MODELLING_GUIDE, note: DESIGN_NOTE, examples: Object.keys(cat.examples), command_families: families, next: 'describe_format with a topic shows examples; list_commands searches commands.' };
       }
       const examples = Object.entries(cat.examples).filter(([k, v]) => k.includes(topic) || JSON.stringify(v.commands).toLowerCase().includes(topic) || v.features.some((f) => String(f.type).toLowerCase().includes(topic)));
       const commands = cat.commands.filter((c) => c.id.toLowerCase().includes(topic)).slice(0, 15);
@@ -262,6 +281,10 @@ export async function runTool(ctx, name, a = {}) {
       if (a.screenshot) calls.push({ method: 'keel.screenshot', params: { view: a.screenshot } });
       const r = await run(ctx, t, calls, null, { allowFail: true });
       const batch = r.results[0];
+      if (r.ok && !batch?.failed && r.saved) {
+        // Name what the commands made (where the agent didn't): applied by the room, merged live.
+        await ctx.call(`/docs/${t.id}/edit`, { method: 'POST', body: { edits: [{ op: 'auto_name' }] }, key: t.key }).catch(() => {});
+      }
       const text = { ok: r.ok && !batch?.failed, seq: r.seq, saved: r.saved, completed: batch?.completed, failed: batch?.failed || r.failed || undefined, results: batch?.results };
       const shot = r.results[1];
       if (shot?.image) return { __content: [{ type: 'text', text: JSON.stringify(text, null, 2) }, { type: 'image', data: shot.image, mimeType: shot.mime }] };

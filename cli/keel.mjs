@@ -32,7 +32,7 @@ import { createInterface } from 'node:readline';
 import { spawn } from 'node:child_process';
 import { tmpdir } from 'node:os';
 import { mergeDesigns } from '../public/js/merge.js';
-import { TOOLS, DESIGN_NOTE, runTool, handleRpc } from '../public/js/agent-tools.js';
+import { TOOLS, DESIGN_NOTE, MODELLING_GUIDE, runTool, handleRpc } from '../public/js/agent-tools.js';
 
 const VERSION = '0.2.0';
 const CONFIG = join(process.env.XDG_CONFIG_HOME || join(homedir(), '.config'), 'keel', 'config.json');
@@ -464,7 +464,7 @@ function serveMcp() {
     instructions:
       `Keel is collaborative CAD; these tools reach Keel documents at ${cfg.url} (people may be editing them live) and local SolidCraft .sc files. ` +
       (cfg.token ? 'Signed in with an account token. ' : 'Not signed in: create_document and upload_file make loose documents (no account, reached by key, deleted after a set number of days). ') +
-      'To edit as a file: pull_document, edit the .sc file (by hand, or with solidcraft-cli\'s MCP server for kernel-checked edits), then push_document. ' + DESIGN_NOTE,
+      'To edit as a file: pull_document, edit the .sc file (by hand, or with solidcraft-cli\'s MCP server for kernel-checked edits), then push_document. ' + MODELLING_GUIDE + ' ' + DESIGN_NOTE,
   };
   const send = (msg) => process.stdout.write(JSON.stringify(msg) + '\n');
   const rl = createInterface({ input: process.stdin });

@@ -251,6 +251,7 @@ async function api(request, env, url) {
     const { edits } = await body(request);
     return stub.fetch('https://room/edit', { method: 'POST', body: JSON.stringify({ edits }) });
   }
+  if (sub === '/review' && method === 'GET') return stub.fetch('https://room/review');
   if (sub === '/changes' && method === 'GET') {
     return stub.fetch(`https://room/changes?since=${encodeURIComponent(url.searchParams.get('since') ?? '')}`);
   }

@@ -43,3 +43,26 @@ test('diff reads like a change list', () => {
   assert.match(d.summary, /w 10 mm→20 mm/);
   assert.equal(diffDesigns(base, base).summary, 'no changes');
 });
+
+import { autoName, reviewDesign } from '../public/js/design-edit.js';
+
+test('auto_name names defaults from what they do, and never a typed name', () => {
+  const d = { features: [
+    { id: 1, name: 'Box1', type: 'box', body_names: ['hub_jaw11'] },
+    { id: 2, name: 'Move1', type: 'move', bodies: ['hub_jaw11'] },
+    { id: 3, name: 'Combine1', type: 'combine', target: 'hub', tools: ['bore'], operation: 'cut' },
+    { id: 4, name: 'My boss', type: 'cylinder', body_names: ['boss'] },
+    { id: 5, name: 'Box2', type: 'box', body_names: ['hub_jaw11'] },
+  ] };
+  assert.equal(autoName(d), 4);
+  assert.deepEqual(d.features.map((f) => f.name), ['Hub jaw 11 box', 'Place hub jaw 11', 'Cut bore from hub', 'My boss', 'Hub jaw 11 box 2']);
+});
+
+test('review flags what a reviewer would, and passes a tidy design', () => {
+  const messy = JSON.stringify({ format: 'solidcraft/57', params: [], features: Array.from({ length: 6 }, (_, i) => ({ id: i + 1, name: `Box${i + 1}`, type: 'box', length: '8', width: '4.8', height: '2.95', param_names: ['a', 'b', 'c'], body_names: [`b${i}`] })) });
+  const r = reviewDesign(messy);
+  assert.deepEqual(r.findings.map((f) => f.rule).sort(), ['magic-numbers', 'names', 'parameters', 'repeats']);
+  assert.ok(r.score < 50);
+  const tidy = JSON.stringify({ format: 'solidcraft/57', params: [{ name: 't', expr: '3 mm', unit: 'mm', model: false }], features: [{ id: 1, name: 'Base plate', type: 'box', length: 't', param_names: ['d1'] }] });
+  assert.equal(reviewDesign(tidy).score, 100);
+});

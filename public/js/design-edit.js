@@ -12,8 +12,10 @@
 //   {op:'add', feature: {type, name?, ...}, after?}     id comes from next_id; after: a feature (default: the end)
 //   {op:'move', feature, after}                         after: a feature, or null for the start
 //   {op:'rename_design', name}
+//   {op:'auto_name'}                                    name every feature still called "Box12", "Combine5"…
+//                                                       after what it does; names anyone typed are kept
 
-export const EDIT_OPS = ['set_parameter', 'delete_parameter', 'rename', 'suppress', 'delete', 'set', 'add', 'move', 'rename_design'];
+export const EDIT_OPS = ['set_parameter', 'delete_parameter', 'rename', 'suppress', 'delete', 'set', 'add', 'move', 'rename_design', 'auto_name'];
 
 const UNIT_RE = /^(mm|deg|)$/;
 
@@ -144,6 +146,10 @@ function applyOne(d, e) {
       d.features.splice(at, 0, f);
       return `feature ${f.id} "${f.name}" moved`;
     }
+    case 'auto_name': {
+      const n = autoName(d);
+      return n ? `${n} feature${n > 1 ? 's' : ''} named` : 'every feature already has a name';
+    }
     case 'rename_design': {
       const name = String(e.name || '').trim().slice(0, 120);
       if (!name) throw new Error('Give the new name.');
@@ -214,4 +220,101 @@ function summarize(o) {
   if (p.added.length || p.changed.length || p.removed.length) parts.push(`parameters: ${[...p.added.map((x) => `+${x.name}`), ...p.changed.map((x) => `${x.name} ${x.before}→${x.after}`), ...p.removed.map((x) => `-${x.name}`)].join(', ')}`);
   for (const d of o.design) parts.push(`${d.field} changed`);
   return parts.length ? parts.join('; ') : 'no changes';
+}
+
+
+// ---- automatic names ----
+// SolidCraft's own default names: the command's word and a counter.
+export const DEFAULT_NAME = /^(Box|Cylinder|Sphere|Cone|Torus|Wedge|Move|Copy|Combine|Extrude|Revolve|Loft|Sweep|Fillet|Chamfer|Shell|Hole|Draft|Sketch|Pattern|Mirror|Split|Thicken|Offset|Plane|Axis|Point|Scale|Feature)\s?\d+$/;
+
+const human = (s) => String(s).replace(/[_-]+/g, ' ').replace(/([a-z])(\d)/gi, '$1 $2').replace(/\s+/g, ' ').trim().replace(/^./, (c) => c.toUpperCase());
+const list = (names) => (names.length > 3 ? `${names.length} bodies` : names.map((n) => human(n).toLowerCase()).join(', '));
+const typeWord = (f) => String(f.type || 'feature').replace(/Feature$/, '').replace(/[_.]/g, ' ').toLowerCase();
+
+// A name from what a feature does, or null when there's nothing better than the default.
+export function describeFeature(f) {
+  const t = String(f.type || '').toLowerCase();
+  const bodies = f.body_names || [];
+  const arr = (v) => (Array.isArray(v) ? v : v ? [v] : []);
+  if (t === 'move' || t === 'copy') return arr(f.bodies).length ? `Place ${list(arr(f.bodies))}` : null;
+  if (t === 'combine') {
+    const tools = arr(f.tools), target = f.target ? human(f.target).toLowerCase() : 'body';
+    if (!tools.length) return null;
+    if (f.operation === 'cut') return `Cut ${list(tools)} from ${target}`;
+    if (f.operation === 'intersect') return `Intersect ${target} with ${list(tools)}`;
+    return `Join ${list(tools)} to ${target}`;
+  }
+  if (t === 'fillet' || t === 'chamfer') return `${t === 'fillet' ? 'Round' : 'Chamfer'} ${f.body ? `${human(f.body).toLowerCase()} ` : ''}edges${f.radius ? ` (${f.radius})` : f.distance ? ` (${f.distance})` : ''}`;
+  if (t.includes('pattern') || t === 'mirror') {
+    const what = arr(f.features).length ? `${arr(f.features).length} feature${arr(f.features).length > 1 ? 's' : ''}` : arr(f.bodies).length ? list(arr(f.bodies)) : '';
+    return `${t === 'mirror' ? 'Mirror' : 'Pattern'}${what ? ` ${what}` : ''}`;
+  }
+  if (bodies.length) return `${human(bodies[0])}${bodies.length > 1 ? ` (+${bodies.length - 1})` : ''} ${typeWord(f)}`;
+  return null;
+}
+
+export function autoName(d) {
+  let n = 0;
+  for (const f of d.features || []) {
+    if (!DEFAULT_NAME.test(String(f.name || '')) && f.name) continue;
+    const name = describeFeature(f);
+    if (!name) continue;
+    f.name = freeName({ features: d.features.filter((x) => x !== f) }, name.slice(0, 100));
+    n++;
+  }
+  return n;
+}
+
+// ---- design review: what a CAD reviewer would flag ----
+export function reviewDesign(text) {
+  const d = JSON.parse(text);
+  const feats = d.features || [];
+  const findings = [];
+  const add = (severity, rule, message, fix, examples) => findings.push({ severity, rule, message, fix, ...(examples?.length ? { examples: examples.slice(0, 6) } : {}) });
+
+  const unnamed = feats.filter((f) => !f.name || DEFAULT_NAME.test(f.name));
+  if (unnamed.length) add('high', 'names', `${unnamed.length} of ${feats.length} features still have default names, so the timeline doesn't say what anything is.`, 'edit_document [{op:"auto_name"}] names them from what they do; better, pass name: to every command ("Mounting holes", not "Extrude3").', unnamed.map((f) => `${f.id} ${f.name}`));
+
+  const userParams = (d.params || []).filter((p) => !p.model);
+  const dims = feats.flatMap((f) => (f.param_names || []).length);
+  const nDims = dims.reduce((a, b) => a + b, 0);
+  if (!userParams.length && nDims >= 6) add('high', 'parameters', `No design parameters: all ${nDims} dimensions are typed-in numbers, so changing the design means editing them one by one.`, 'set_parameter the driving sizes (thickness, bore, length...) and use them in expressions ("plate_t", "bore_d / 2") when you create features.');
+
+  // Literal numbers repeated across features: candidates for a parameter.
+  const counts = new Map();
+  const walk = (v, f) => {
+    if (typeof v === 'string' && /^-?\d+(\.\d+)?( ?mm| ?deg)?$/.test(v.trim()) && Number(v) !== 0) counts.set(v.trim(), (counts.get(v.trim()) || new Set()).add(f.id));
+    else if (v && typeof v === 'object') for (const k of Object.keys(v)) if (k !== 'id' && k !== 'sketch') walk(v[k], f);
+  };
+  for (const f of feats) for (const k of ['length', 'width', 'height', 'radius', 'distance', 'depth', 'thickness', 'diameter', 'extent']) if (f[k] !== undefined) walk(f[k], f);
+  const repeated = [...counts].filter(([, ids]) => ids.size >= 3).sort((a, b) => b[1].size - a[1].size);
+  if (repeated.length) add('medium', 'magic-numbers', `${repeated.length} value${repeated.length > 1 ? 's are' : ' is'} typed into 3 or more features.`, 'Make each a parameter so they change together.', repeated.map(([v, ids]) => `${v} in ${ids.size} features`));
+
+  // Computed placements: moves with long decimals or oblique axes.
+  const oddMoves = feats.filter((f) => String(f.type).toLowerCase() === 'move' && (JSON.stringify(f.translate || '').match(/\d\.\d{6,}/) || JSON.stringify(f.rotate_axis || '').match(/\d\.\d{6,}/)));
+  if (oddMoves.length) add('medium', 'placement', `${oddMoves.length} move features place bodies with computed numbers (long decimals or tilted axes), which nobody can read or adjust.`, 'Sketch on a plane or construction plane placed where the part goes (sketch.create plane {origin, x_dir, y_dir} with parameter expressions), or use mirror and patterns.', oddMoves.map((f) => `${f.id} ${f.name}`));
+
+  // Bodies made separately then combined, where an operation on the feature would do.
+  const combines = feats.filter((f) => String(f.type).toLowerCase() === 'combine');
+  if (combines.length >= 4) add('low', 'combine-chains', `${combines.length} combine features: bodies are built separately and merged afterwards.`, 'Create with operation: "join" or "cut" (and targets) so each feature adds to or cuts the part directly; it halves the timeline.');
+
+  // Repeated geometry: same type and size made more than once.
+  const sig = new Map();
+  for (const f of feats) {
+    const t = String(f.type).toLowerCase();
+    if (!['box', 'cylinder', 'extrude', 'loft', 'revolve'].includes(t)) continue;
+    const key = JSON.stringify([t, f.length, f.width, f.height, f.radius, f.extent?.distance]);
+    sig.set(key, [...(sig.get(key) || []), f]);
+  }
+  const dupes = [...sig.values()].filter((g) => g.length >= 2 && g[0].type !== 'loft');
+  if (dupes.length) add('medium', 'repeats', `${dupes.length} shape${dupes.length > 1 ? 's are' : ' is'} built more than once with identical sizes.`, 'Build one, then solid.pattern.circular / linear or mirror it, so a change to one changes all.', dupes.map((g) => `${g.length}× ${g[0].type} ${g.map((f) => f.id).join(', ')}`));
+
+  const bodies = new Set(feats.flatMap((f) => f.body_names || []));
+  const score = Math.max(0, 100 - findings.reduce((s, f) => s + ({ high: 25, medium: 12, low: 5 }[f.severity]), 0));
+  return {
+    score,
+    summary: findings.length ? `${findings.length} thing${findings.length > 1 ? 's' : ''} to improve (score ${score}/100).` : 'Looks well built: named, parametric, no obvious repetition (score 100/100).',
+    stats: { features: feats.length, parameters: userParams.length, dimensions: nDims, bodies: bodies.size },
+    findings,
+  };
 }

@@ -248,7 +248,7 @@ function eq(a, b) {
 return { mergeDesigns, eq };
 })();
 // ---- inlined from public/js/agent-tools.js
-const { TOOLS, DESIGN_NOTE, runTool, handleRpc } = (() => {
+const { TOOLS, DESIGN_NOTE, MODELLING_GUIDE, runTool, handleRpc } = (() => {
 // The tools Keel offers AI agents, shared by the remote MCP endpoint (worker/mcp.js, at /mcp) and
 // the local `keel mcp` server (public/keel.mjs). Both call Keel's HTTP API through `ctx.call`, so
 // the rules (access, merging, limits) are the API's.
@@ -261,6 +261,15 @@ const { TOOLS, DESIGN_NOTE, runTool, handleRpc } = (() => {
 //   reads?: Map, remembering what was read so a write can send its base text too,
 //   asset(path) -> parsed JSON of a file the site serves (the format catalog),
 // }
+
+const MODELLING_GUIDE =
+  'Model like a careful CAD engineer, not a script: ' +
+  '(1) set_parameter the driving sizes first and use them in expressions; ' +
+  '(2) give every feature a name for what it is ("Bore", "Blade clamp jaw"); ' +
+  '(3) sketch on planes and extrude or revolve, with operation "join"/"cut" onto the part, rather than placing boxes with move and combining; ' +
+  '(4) build a repeated or symmetric thing once, then pattern or mirror it; ' +
+  '(5) after each step, screenshot and inspect_model; ' +
+  '(6) before you finish, review_design and fix what it flags.';
 
 const DESIGN_NOTE =
   'A design is SolidCraft JSON: {format, name, units, params:[{name, value...}], features:[{id, name, type, suppressed, ...}], next_id, ...}. ' +
@@ -331,6 +340,12 @@ const TOOLS = [
     },
   },
   {
+    name: 'review_design',
+    description: 'Mark a design the way a CAD reviewer would, with a score: default feature names, no parameters, numbers typed into many features, computed placements, combine chains, shapes built twice instead of patterned. Each finding says how to fix it. Run it before you call a design done.',
+    inputSchema: { type: 'object', properties: { id: ID }, required: ['id'] },
+    annotations: { readOnlyHint: true },
+  },
+  {
     name: 'get_changes',
     description: 'What changed in a document since a seq (one of the last 50 changes): features added, removed and renamed, each changed field with before and after, and parameters. Much smaller than reading the whole design.',
     inputSchema: { type: 'object', properties: { id: ID, since_seq: { type: 'integer' } }, required: ['id', 'since_seq'] },
@@ -367,7 +382,7 @@ const TOOLS = [
     description:
       'Model with SolidCraft\'s own commands, run by the real kernel in a browser tab on the document; the result syncs to everyone like a person\'s edit. ' +
       'commands: [{command, params}] (see list_commands), run as one batch: if one fails, the batch is undone (rollback) and the failure is returned. ' +
-      'Name what you make: most create commands take a name or body_name ("Mounting plate", not "Extrude1"). screenshot: a view name to get a picture afterwards.',
+      'Name what you make: most create commands take name and body_name ("Mounting plate", not "Extrude1"); anything left unnamed is named automatically from what it does. Use parameter expressions for sizes. screenshot: a view name to get a picture afterwards. ' + MODELLING_GUIDE,
     inputSchema: {
       type: 'object',
       properties: { id: ID, commands: { type: 'array', items: { type: 'object' } }, screenshot: { type: 'string' } },
@@ -474,6 +489,10 @@ async function runTool(ctx, name, a = {}) {
       if (a.check && !r.unchanged) out.check = await inspect(ctx, t, { at_seq: r.seq }).catch((e) => ({ unavailable: e.message }));
       return out;
     }
+    case 'review_design': {
+      const t = await target(ctx, a.id);
+      return ctx.call(`/docs/${t.id}/review`, { key: t.key });
+    }
     case 'get_changes': {
       const t = await target(ctx, a.id);
       return ctx.call(`/docs/${t.id}/changes?since=${encodeURIComponent(a.since_seq)}`, { key: t.key });
@@ -500,7 +519,7 @@ async function runTool(ctx, name, a = {}) {
       if (!topic) {
         const families = {};
         for (const c of cat.commands) { const fam = c.id.split('.')[0]; families[fam] = (families[fam] || 0) + 1; }
-        return { format: cat.format, note: DESIGN_NOTE, examples: Object.keys(cat.examples), command_families: families, next: 'describe_format with a topic shows examples; list_commands searches commands.' };
+        return { format: cat.format, how_to_model: MODELLING_GUIDE, note: DESIGN_NOTE, examples: Object.keys(cat.examples), command_families: families, next: 'describe_format with a topic shows examples; list_commands searches commands.' };
       }
       const examples = Object.entries(cat.examples).filter(([k, v]) => k.includes(topic) || JSON.stringify(v.commands).toLowerCase().includes(topic) || v.features.some((f) => String(f.type).toLowerCase().includes(topic)));
       const commands = cat.commands.filter((c) => c.id.toLowerCase().includes(topic)).slice(0, 15);
@@ -513,6 +532,10 @@ async function runTool(ctx, name, a = {}) {
       if (a.screenshot) calls.push({ method: 'keel.screenshot', params: { view: a.screenshot } });
       const r = await run(ctx, t, calls, null, { allowFail: true });
       const batch = r.results[0];
+      if (r.ok && !batch?.failed && r.saved) {
+        // Name what the commands made (where the agent didn't): applied by the room, merged live.
+        await ctx.call(`/docs/${t.id}/edit`, { method: 'POST', body: { edits: [{ op: 'auto_name' }] }, key: t.key }).catch(() => {});
+      }
       const text = { ok: r.ok && !batch?.failed, seq: r.seq, saved: r.saved, completed: batch?.completed, failed: batch?.failed || r.failed || undefined, results: batch?.results };
       const shot = r.results[1];
       if (shot?.image) return { __content: [{ type: 'text', text: JSON.stringify(text, null, 2) }, { type: 'image', data: shot.image, mimeType: shot.mime }] };
@@ -589,7 +612,7 @@ async function handleRpc(msg, { ctx, tools = TOOLS, run = (n, a) => runTool(ctx,
   }
 }
 
-return { DESIGN_NOTE, TOOLS, openUrl, runTool, handleRpc };
+return { MODELLING_GUIDE, DESIGN_NOTE, TOOLS, openUrl, runTool, handleRpc };
 })();
 
 const VERSION = '0.2.0';
@@ -1022,7 +1045,7 @@ function serveMcp() {
     instructions:
       `Keel is collaborative CAD; these tools reach Keel documents at ${cfg.url} (people may be editing them live) and local SolidCraft .sc files. ` +
       (cfg.token ? 'Signed in with an account token. ' : 'Not signed in: create_document and upload_file make loose documents (no account, reached by key, deleted after a set number of days). ') +
-      'To edit as a file: pull_document, edit the .sc file (by hand, or with solidcraft-cli\'s MCP server for kernel-checked edits), then push_document. ' + DESIGN_NOTE,
+      'To edit as a file: pull_document, edit the .sc file (by hand, or with solidcraft-cli\'s MCP server for kernel-checked edits), then push_document. ' + MODELLING_GUIDE + ' ' + DESIGN_NOTE,
   };
   const send = (msg) => process.stdout.write(JSON.stringify(msg) + '\n');
   const rl = createInterface({ input: process.stdin });

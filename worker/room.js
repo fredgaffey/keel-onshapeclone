@@ -7,7 +7,7 @@
 // sends again. WebSockets use the hibernation API, so an idle room costs nothing.
 
 import { mergeDesigns } from '../public/js/merge.js';
-import { applyEdits, diffDesigns } from '../public/js/design-edit.js';
+import { applyEdits, autoName, diffDesigns, reviewDesign } from '../public/js/design-edit.js';
 
 const CHUNK = 1_000_000; // storage values are capped at 2 MB; designs can be bigger
 const MAX_TEXT = 16 * 1024 * 1024; // the most SolidCraft's document.import accepts
@@ -134,7 +134,12 @@ export class DocRoom {
         }
         out = merged.text;
       }
-      const result = { merged: !!merged, conflicts: merged?.details || [], ...(merged ? { text: out } : {}) };
+      // Agents' new features get names from what they do, unless the agent named them.
+      let named = 0;
+      if (user?.agent) {
+        try { const d = JSON.parse(out); named = autoName(d); if (named) out = JSON.stringify(d, null, 2); } catch { /* left as sent */ }
+      }
+      const result = { merged: !!merged, conflicts: merged?.details || [], ...(merged || named ? { text: out, auto_named: named } : {}) };
       if (out === head.text) return Response.json({ seq: head.seq, unchanged: true, ...result });
       await this.agentSeen(user, 'editing', true);
       const next = await this.store(out, user, docId);
@@ -147,13 +152,18 @@ export class DocRoom {
       const { edits } = await request.json();
       const head = await this.load();
       let r;
-      try { r = applyEdits(head.text, edits); } catch (e) { return Response.json({ error: e.message, seq: head.seq }, { status: 400 }); }
+      try { r = applyEdits(head.text, user?.agent && !edits?.some?.((e) => e?.op === 'auto_name') ? [...edits, { op: 'auto_name' }] : edits); } catch (e) { return Response.json({ error: e.message, seq: head.seq }, { status: 400 }); }
+      if (r.done[r.done.length - 1] === 'every feature already has a name' && !edits.some((e) => e?.op === 'auto_name')) r.done.pop();
       if (r.text.length > MAX_TEXT) return Response.json({ error: 'Design too large.' }, { status: 413 });
       if (r.text === head.text) return Response.json({ seq: head.seq, unchanged: true, done: r.done });
       await this.agentSeen(user, 'editing', true);
       const next = await this.store(r.text, user, docId);
       this.broadcast({ type: 'remote', seq: next.seq, text: r.text, by: user?.name || null });
       return Response.json({ seq: next.seq, done: r.done, before_seq: head.seq });
+    }
+    if (url.pathname === '/review') {
+      const head = await this.load();
+      try { return Response.json({ seq: head.seq, ...reviewDesign(head.text) }); } catch (e) { return Response.json({ error: `Can't read the design: ${e.message}` }, { status: 422 }); }
     }
     if (url.pathname === '/changes') {
       // What changed since a recent seq, readably (design-edit.js diffDesigns).
