@@ -2,7 +2,7 @@
 // The API is never cached; documents are kept on the device by the pages themselves (local.js).
 const SHELL = 'keel-shell-v3';
 const CAD = 'keel-cad-v2';
-const SHELL_FILES = ['/', '/doc', '/css/keel.css', '/js/api.js', '/js/home.js', '/js/editor.js', '/js/local.js', '/js/merge.js', '/js/flexblade.js', '/img/keel.svg', '/manifest.webmanifest'];
+const SHELL_FILES = ['/', '/doc', '/css/keel.css', '/js/api.js', '/js/home.js', '/js/editor.js', '/js/local.js', '/js/merge.js', '/js/flexblade.js', '/js/scripts-panel.js', '/js/scripts/index.js', '/js/scripts/airfoil.js', '/js/scripts/propeller.js', '/img/keel.svg', '/manifest.webmanifest'];
 
 self.addEventListener('install', (e) => {
   e.waitUntil(caches.open(SHELL).then((c) => c.addAll(SHELL_FILES)).then(() => self.skipWaiting()));
