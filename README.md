@@ -215,6 +215,11 @@ Tangency Labs' permission, or Keel's own UI kit, theme and icons.
 
 ## Limits worth knowing
 
+- **One local fix in the deployed SolidCraft.** keel.pebnum.com runs SolidCraft built from branch
+  `fix-arrow-orbit-pole` in the SolidCraft checkout (commit 4f696b1e): holding the up or down
+  arrow stopped flipping the view at the pole. Until it's merged upstream, build from that branch
+  (`BUILD=1 scripts/stage-cad.sh`).
+
 - **Remote changes reload the design.** Applying someone else's change reloads the design inside
   SolidCraft, which clears your undo history. Keel waits until you're not mid-drag or in a dialog
   before applying it.

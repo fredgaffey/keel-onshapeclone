@@ -324,6 +324,12 @@ if (process.env.HOST !== '0' && existsSync(CHROME)) {
       const { data } = await rpc({ jsonrpc: '2.0', id: 9, method: 'tools/call', params: { name: 'run_commands', arguments: { id: made.key, commands: [{ command: 'solid.cylinder', params: { radius: 3, height: 8, center: [20, 15, 0], operation: 'cut', name: 'Hole' } }], screenshot: 'top' } } });
       assert.equal(data.result.content[1].type, 'image');
       assert.ok(data.result.content[1].data.length > 5000);
+      const t1 = Date.now();
+      const plain = await rpc({ jsonrpc: '2.0', id: 10, method: 'tools/call', params: { name: 'screenshot', arguments: { id: made.key } } });
+      assert.equal(plain.data.result.content[0].type, 'image', 'a screenshot with no view');
+      assert.ok(Date.now() - t1 < 15_000, `no view: answered in ${Date.now() - t1} ms`);
+      const again = await mcpTool('inspect_model', { id: made.key });
+      assert.equal(again.value.rebuilds, true, 'the host tab still answers afterwards');
       const fail = JSON.parse((await mcpTool('run_commands', { id: made.key, commands: [{ command: 'solid.fillet', params: { radius: 2 } }] })).text);
       assert.equal(fail.ok, false);
       assert.match(fail.failed.error, /edges/);
