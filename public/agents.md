@@ -6,9 +6,20 @@ work on local `.sc` design files. Keel's server never models: it stores and merg
 modelling runs on each person's device.
 
 There are two ways in:
-- **Remote MCP server:** nothing to install. Use it to read and write documents.
+- **Remote MCP server:** nothing to install. `https://keel.pebnum.com/mcp` needs sign-in (OAuth or
+  a token); `https://keel.pebnum.com/mcp/loose` needs no account.
 - **The `keel` command and local MCP server:** one Node file. It does everything the remote server
-  does, and also works on local files: pull, push, merge and check.
+  does, and also works on local files (pull, push, merge, check), and can start a headless browser
+  tab for the modeller (`keel host`).
+
+**The server never models, but agents can still use the real modelling kernel.** Any browser tab
+with the document open runs it for them, unless its **Agents** switch is off. It runs:
+- kernel rebuild checks
+- volumes and areas
+- screenshots
+- SolidCraft's own modelling commands
+
+With no tab open, `keel host <id>` (or the `start_host` tool) opens one in headless Chrome.
 
 ## Connect
 
@@ -17,7 +28,15 @@ differs.
 
 ### With an account
 
-Make a token on the website: click your name, then **API tokens and agents**.
+**Apps with connectors** (claude.ai, ChatGPT, Claude Code): add `https://keel.pebnum.com/mcp` and
+sign in to Keel when asked (OAuth). The connection appears under **API tokens and agents** on the
+website, where you can disconnect it.
+
+```sh
+claude mcp add --transport http keel https://keel.pebnum.com/mcp    # then /mcp in Claude Code to sign in
+```
+
+**Or with a token.** To make one on the website, click your name, then **API tokens and agents**.
 
 ```sh
 # Claude Code, remote (nothing to install)
@@ -34,10 +53,10 @@ commit tokens. Revoke a leaked one on the website.
 
 ### Without an account: loose documents
 
-Leave the header off, or don't log in:
+Use the `/mcp/loose` endpoint, or the `keel` command without logging in:
 
 ```sh
-claude mcp add --transport http keel https://keel.pebnum.com/mcp
+claude mcp add --transport http keel-loose https://keel.pebnum.com/mcp/loose
 ```
 
 `create_document` (or `keel new "Bracket" --loose`) makes a **loose document**:
@@ -65,11 +84,26 @@ claude mcp add --transport http keel https://keel.pebnum.com/mcp
 | `read_document` | ✓ | ✓ | Design JSON and its `seq` |
 | `write_document` | ✓ | ✓ | Save a design from `base_seq`, merging with changes made since |
 | `create_document` | ✓ | ✓ | New document; `loose: true` (or no token) makes a loose one |
+| `edit_document` | ✓ | ✓ | Typed edits; never conflicts; `check: true` rebuilds it with the kernel |
+| `get_changes` | ✓ | ✓ | What changed since a seq: added, removed, renamed, each field before and after |
+| `describe_format`, `list_commands` | ✓ | ✓ | The format reference: tested examples and the commands' parameters |
+| `inspect_model` ⚙ | ✓ | ✓ | Kernel rebuild check: errors per feature, bodies, volumes (`measure`) |
+| `screenshot` ⚙ | ✓ | ✓ | The model as the modeller draws it, from any view |
+| `run_commands` ⚙ | ✓ | ✓ | SolidCraft commands, run as one batch that rolls back on failure |
+| `start_host` | | ✓ | Opens a headless browser tab for the ⚙ tools |
 | `save_version`, `list_versions` | ✓ | ✓ | Named versions, which can be restored on the website |
 | `pull_document` | | ✓ | Document to a linked local `.sc` file; merges local changes onto newer ones |
 | `push_document` | | ✓ | Linked file back to the document, merged |
 | `file_status` | | ✓ | Whether the file, the document, or both have changed |
 | `upload_file` | | ✓ | Local `.sc` file to a new document, and link it |
+
+⚙: runs in a browser tab that has the document open with agents allowed (see the top of this
+page). The tab's changes sync like that person's edits. Agents can't run file, plugin or app
+commands there.
+
+Agents show among the people on a document while they work. Before an agent's first change after
+10 minutes idle, Keel saves a version named "Before <agent>'s changes", so one restore undoes the
+whole session.
 | `merge_files` | | ✓ | Three-way merge of local files: base, mine and theirs |
 
 ## Merging and conflicts
@@ -96,6 +130,14 @@ server.
 
 ## Editing a design
 
+**Recommended order:**
+1. `describe_format` to see the format.
+2. `run_commands` to model with the real kernel, checking with `screenshot` and `inspect_model`.
+3. `edit_document` for small changes such as renaming, dimensions and parameters.
+4. `write_document` only for big rewrites.
+
+Dimensions are expression strings (`"12"`, `"width / 2"`), not numbers.
+
 A design is `{format, name, units, params, features:[{id, name, type, suppressed, ...}], next_id, ...}`.
 - Keep `format` unchanged.
 - New features take ids from `next_id`. Then raise `next_id`.
@@ -118,5 +160,8 @@ Send `Authorization: Bearer <token or key>` with each request.
 | `GET /api/docs/:id/content` | `{seq, text}` |
 | `PUT /api/docs/:id/content` | Body `{base, text, base_text?, on_conflict?}`. Returns 409 with `current` and, for `ask`, `conflicts` |
 | `POST /api/docs` | Body `{name, text?}` |
+| `POST /api/docs/:id/edit` | Body `{edits}` (see `edit_document`) |
+| `GET /api/docs/:id/changes?since=N` | What changed since seq `N` |
+| `POST /api/docs/:id/run` | Body `{calls: [{method, params}], at_seq?}`: run in a host tab. Methods: `document.inspect`, `ui.inspect`, `engine.execute`, `engine.batch`, `ui.view`, `ui.camera`, `keel.screenshot` |
 | `POST /api/loose` | Body `{name, text?, by?}`. No auth. Returns `{document, key, url, deleted_at, note}` |
 | `GET /api/docs/:id/versions`, `POST /api/docs/:id/versions` | List or save versions; POST takes `{name}` |

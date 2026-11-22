@@ -317,6 +317,7 @@ async function tokensDialog() {
   const setup = (token) => `
     <p style="margin:0 0 6px"><b>Claude Code, nothing to install</b> (the remote MCP server):</p>
     <pre class="code">claude mcp add --transport http keel ${esc(site)}/mcp --header "Authorization: Bearer ${esc(token)}"</pre>
+    <p class="meta" style="margin:6px 0 0">claude.ai, ChatGPT and other apps with connectors: add <code>${esc(site)}/mcp</code> as a custom connector and sign in when asked. No token needed.</p>
     <p style="margin:10px 0 6px"><b>Or the <code>keel</code> command</b>, which also pulls documents to local <code>.sc</code> files, pushes them back and merges:</p>
     <pre class="code">curl -fsSLO ${esc(site)}/keel.mjs
 node keel.mjs login --url ${esc(site)} --token ${esc(token)}

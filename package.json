@@ -11,7 +11,8 @@
     "dev": "wrangler dev --port 8787 --local-upstream 127.0.0.1:8787 --test-scheduled",
     "e2e": "node tests/e2e.mjs",
     "build:cli": "node scripts/build-cli.mjs",
-    "test:agents": "node tests/agents.mjs"
+    "test:agents": "node tests/agents.mjs",
+    "catalog": "node scripts/feature-catalog.mjs"
   },
   "devDependencies": {
     "@playwright/test": "^1.65.1",
