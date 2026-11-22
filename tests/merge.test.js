@@ -67,3 +67,13 @@ test('big integers survive', () => {
   assert.match(r, /"name": "E"/);
   assert.match(r, /"length": "31"/);
 });
+
+test('prefer theirs keeps their value and details describe the clash', () => {
+  const base = JSON.stringify({ format: 'solidcraft/57', features: [{ id: 1, name: 'Box', depth: 10 }], next_id: 2 });
+  const mine = JSON.stringify({ format: 'solidcraft/57', features: [{ id: 1, name: 'Box', depth: 20 }], next_id: 2 });
+  const theirs = JSON.stringify({ format: 'solidcraft/57', features: [{ id: 1, name: 'Box', depth: 30 }], next_id: 2 });
+  const r = mergeDesigns(base, mine, theirs, { prefer: 'theirs' });
+  assert.equal(JSON.parse(r.text).features[0].depth, 30);
+  assert.deepEqual(r.details, [{ path: 'feature 1.depth', kind: 'both-changed', base: 10, mine: 20, theirs: 30, kept: 'theirs' }]);
+  assert.equal(JSON.parse(mergeDesigns(base, mine, theirs).text).features[0].depth, 20);
+});

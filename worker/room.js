@@ -6,9 +6,12 @@
 // text back ({type:'stale'}), merges its change onto it in the browser (public/js/merge.js) and
 // sends again. WebSockets use the hibernation API, so an idle room costs nothing.
 
+import { mergeDesigns } from '../public/js/merge.js';
+
 const CHUNK = 1_000_000; // storage values are capped at 2 MB; designs can be bigger
 const MAX_TEXT = 16 * 1024 * 1024; // the most SolidCraft's document.import accepts
 const AUTO_VERSION_EVERY = 100; // updates between automatic versions
+const HISTORY = 50; // recent designs kept (when under CHUNK), so an HTTP update naming only its base can merge
 const COLORS = ['#e4572e', '#2e86ab', '#7d3c98', '#17a398', '#f2a541', '#d6336c', '#3b8c3b', '#4f5d75'];
 
 export class DocRoom {
@@ -37,7 +40,9 @@ export class DocRoom {
     const chunks = Math.max(1, Math.ceil(text.length / CHUNK));
     const entries = { meta: { seq: head.seq + 1, chunks, by: by?.name || null, at: Date.now(), docId: docId || head.docId } };
     for (let i = 0; i < chunks; i++) entries[`text:${i}`] = text.slice(i * CHUNK, (i + 1) * CHUNK);
+    if (text.length <= CHUNK) entries[`hist:${head.seq + 1}`] = text;
     await this.ctx.storage.put(entries);
+    if (head.seq + 1 > HISTORY) await this.ctx.storage.delete(`hist:${head.seq + 1 - HISTORY}`);
     this.head = { seq: head.seq + 1, text, by: by?.name || null, at: entries.meta.at, docId: entries.meta.docId };
     // Tell D1 (the document list) a little later, once a burst of edits has settled.
     await this.ctx.storage.setAlarm(Date.now() + 2000);
@@ -79,6 +84,39 @@ export class DocRoom {
       this.broadcast({ type: 'remote', seq: head.seq, text, by: user?.name || null, restored: true });
       return Response.json({ seq: head.seq });
     }
+    if (url.pathname === '/update' && request.method === 'POST') {
+      // An edit over HTTP (an agent, a script, the keel CLI or the MCP endpoint). Same rule as a
+      // socket update, but when someone got in first it merges here, with the design the caller
+      // started from (sent as base_text, or found in recent history). Merging is data only: the
+      // server never models. on_conflict: 'mine' (default) or 'theirs' picks the winner of a field
+      // both changed; 'ask' saves nothing and returns the conflicts and current design instead.
+      if (request.headers.get('x-role') !== 'edit') return Response.json({ error: 'You can view this document but not edit it.' }, { status: 403 });
+      const { base, text, base_text, on_conflict = 'mine' } = await request.json();
+      if (typeof text !== 'string' || text.length > MAX_TEXT) return Response.json({ error: 'Design too large.' }, { status: 413 });
+      const head = await this.load();
+      const current = { seq: head.seq, text: head.text, by: head.by };
+      let out = text, merged = null;
+      if (base !== head.seq) {
+        if (!Number.isInteger(base) || base > head.seq) return Response.json({ error: `There is no version ${base}; the document is at ${head.seq}.`, current }, { status: 409 });
+        const from = typeof base_text === 'string' ? base_text : await this.ctx.storage.get(`hist:${base}`);
+        if (typeof from !== 'string') return Response.json({ error: `Someone else changed the design since version ${base}, which is too old to merge from. Read it again and redo the change.`, current }, { status: 409 });
+        try { merged = mergeDesigns(from, text, head.text, { prefer: on_conflict === 'theirs' ? 'theirs' : 'mine' }); } catch (e) {
+          return Response.json({ error: `Couldn't merge with the newer design: ${e.message}`, current }, { status: 409 });
+        }
+        if (on_conflict === 'ask' && merged.details.length) {
+          return Response.json({
+            error: `Not saved: ${merged.details.length} conflict(s) with changes made since version ${base}. Resolve them in the design, then write again with base ${head.seq}.`,
+            conflicts: merged.details, current, merged_text: merged.text,
+          }, { status: 409 });
+        }
+        out = merged.text;
+      }
+      const result = { merged: !!merged, conflicts: merged?.details || [], ...(merged ? { text: out } : {}) };
+      if (out === head.text) return Response.json({ seq: head.seq, unchanged: true, ...result });
+      const next = await this.store(out, user, docId);
+      this.broadcast({ type: 'remote', seq: next.seq, text: out, by: user?.name || null });
+      return Response.json({ seq: next.seq, ...result });
+    }
     if (url.pathname === '/snapshot' && request.method === 'POST') {
       const { name } = await request.json();
       return Response.json(await this.snapshot(String(name || 'Version').slice(0, 120), user.id));
@@ -90,6 +128,14 @@ export class DocRoom {
         const a = ws.deserializeAttachment();
         if (!userId || a.user.id === userId) ws.close(4403, 'access removed');
       }
+      return Response.json({ ok: true });
+    }
+    if (url.pathname === '/purge' && request.method === 'POST') {
+      // A loose document reached its deletion date: drop everyone and erase the room.
+      for (const ws of this.ctx.getWebSockets()) ws.close(4410, 'document deleted');
+      await this.ctx.storage.deleteAlarm();
+      await this.ctx.storage.deleteAll();
+      this.head = null;
       return Response.json({ ok: true });
     }
     return new Response('not found', { status: 404 });

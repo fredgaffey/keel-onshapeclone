@@ -73,14 +73,82 @@ export async function endSession(env, request) {
   return `${COOKIE}=; Path=/; HttpOnly; SameSite=Lax; Max-Age=0`;
 }
 
-export async function currentUser(env, request) {
+// `key`: a token given another way, e.g. in a WebSocket URL, where browsers can't set headers.
+export async function currentUser(env, request, key = null) {
+  const bearer = /^Bearer\s+(keel_\S+)$/i.exec(request.headers.get('authorization') || '');
+  if (bearer) return tokenUser(env, bearer[1]);
+  if (key && key.startsWith(TOKEN_PREFIX)) return tokenUser(env, key);
   const token = readCookie(request);
   if (!token) return null;
   const row = await env.DB.prepare(
     'SELECT u.id, u.email, u.name, s.expires_at FROM sessions s JOIN users u ON u.id = s.user_id WHERE s.token_hash = ?',
   ).bind(await sha256(token)).first();
   if (!row || row.expires_at < Date.now()) return null;
-  return { id: row.id, email: row.email, name: row.name };
+  return { id: row.id, email: row.email, name: row.name, via: 'session' };
+}
+
+// ---- API tokens: for agents and scripts, sent as `Authorization: Bearer keel_...` ----
+
+const TOKEN_PREFIX = 'keel_';
+const MAX_TOKENS = 50;
+// Loose documents are deleted this many days after they're made (wrangler.jsonc `LOOSE_DAYS`).
+export const looseDays = (env) => Math.min(365, Math.max(1, Number(env.LOOSE_DAYS) || 30));
+
+async function tokenUser(env, token) {
+  const row = await env.DB.prepare(
+    `SELECT t.id AS token_id, t.name AS token_name, t.scope, t.expires_at, t.last_used_at, t.document_id, u.id, u.email, u.name
+       FROM api_tokens t JOIN users u ON u.id = t.user_id WHERE t.token_hash = ?`,
+  ).bind(await sha256(token)).first();
+  if (!row) throw new HttpError(401, 'That API token is not valid. It may have been revoked.');
+  if (row.expires_at && row.expires_at < Date.now()) throw new HttpError(401, 'That API token has expired.');
+  // Record use, but at most once a minute per token.
+  // Record use, at most once a minute per token.
+  if (!row.last_used_at || Date.now() - row.last_used_at > 60_000) {
+    await env.DB.prepare('UPDATE api_tokens SET last_used_at = ? WHERE id = ?').bind(Date.now(), row.token_id).run();
+  }
+  return {
+    id: row.id, email: row.email, name: row.name, via: 'token',
+    token: { id: row.token_id, name: row.token_name, scope: row.scope, document_id: row.document_id || null, expires_at: row.expires_at },
+  };
+}
+
+export async function createToken(env, userId, { name, scope, days, documentId = null, expiresAt = null }) {
+  name = String(name || '').replace(/[\u0000-\u001f]/g, '').trim().slice(0, 80);
+  if (!name) throw new HttpError(400, 'Give the token a name, such as "Claude Code on my laptop".');
+  if (scope !== 'read') scope = 'write';
+  days = Number(days) || 0;
+  if (days < 0 || days > 3650) throw new HttpError(400, 'Expiry must be between 1 and 3650 days, or never.');
+  const { n } = await env.DB.prepare('SELECT COUNT(*) AS n FROM api_tokens WHERE user_id = ?').bind(userId).first();
+  if (n >= MAX_TOKENS) throw new HttpError(400, `You have ${MAX_TOKENS} tokens already. Revoke some first.`);
+  const token = TOKEN_PREFIX + randomId(32);
+  const row = { id: randomId(10), name, scope, hint: token.slice(-4), created_at: Date.now(), last_used_at: null, expires_at: expiresAt || (days ? Date.now() + days * 86400_000 : null), document_id: documentId };
+  await env.DB.prepare('INSERT INTO api_tokens (id, user_id, name, token_hash, hint, scope, created_at, expires_at, document_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)')
+    .bind(row.id, userId, name, await sha256(token), row.hint, scope, row.created_at, row.expires_at, documentId)
+    .run();
+  return { ...row, token };
+}
+
+export async function listTokens(env, userId) {
+  const { results } = await env.DB.prepare(
+    'SELECT id, name, hint, scope, created_at, last_used_at, expires_at, document_id FROM api_tokens WHERE user_id = ? ORDER BY created_at DESC',
+  ).bind(userId).all();
+  return results;
+}
+
+export async function revokeToken(env, userId, id) {
+  const r = await env.DB.prepare('DELETE FROM api_tokens WHERE id = ? AND user_id = ?').bind(id, userId).run();
+  if (!r.meta.changes) throw new HttpError(404, 'No such token.');
+}
+
+// A guest: the owner of loose documents. No email that can receive mail, no password, so the
+// only way in is the document's key.
+export async function createGuest(env, name) {
+  const user = { id: randomId(), name: String(name || '').replace(/[\u0000-\u001f]/g, '').trim().slice(0, 60) || 'Guest' };
+  user.email = `guest-${user.id.toLowerCase()}@loose.invalid`;
+  await env.DB.prepare('INSERT INTO users (id, email, name, pw_salt, pw_hash, created_at) VALUES (?, ?, ?, ?, ?, ?)')
+    .bind(user.id, user.email, user.name, '', '!', Date.now())
+    .run();
+  return user;
 }
 
 function readCookie(request) {

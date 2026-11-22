@@ -7,12 +7,16 @@ export class ApiError extends Error {
   }
 }
 
+// A loose document's key (from the address, `/d/<id>#key=keel_...`), sent instead of the session.
+let key = null;
+export function useKey(k) { key = k; }
+
 export async function api(path, { method = 'GET', body } = {}) {
   let res;
   try {
     res = await fetch(`/api${path}`, {
       method,
-      headers: body !== undefined ? { 'content-type': 'application/json' } : {},
+      headers: { ...(body !== undefined ? { 'content-type': 'application/json' } : {}), ...(key ? { authorization: `Bearer ${key}` } : {}) },
       body: body !== undefined ? JSON.stringify(body) : undefined,
       credentials: 'same-origin',
     });

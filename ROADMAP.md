@@ -54,11 +54,17 @@ Keel's work is the cloud, collaboration and anything SolidCraft defers.
 - [ ] Validation against benchmark cases
 
 ## AI agents
+- [x] API tokens (read/write or read-only, optional expiry), managed on the website
+- [x] Remote MCP server at /mcp, and the `keel` CLI with a stdio MCP server
+- [x] Merging HTTP writes; conflicts resolved as mine, theirs, or returned to the agent (ask)
+- [x] Local `.sc` files: pull, push, status, three-way merge, structure check
+- [x] Loose documents: no account, a key, deleted 30 days after they're made
 - [ ] Agent panel in Keel using your own Anthropic or OpenAI key (kept in the browser) and
       driving SolidCraft's command API, with features named automatically
 - [ ] Agents join a document as collaborators (presence, live edits); each turn is one version
-- [ ] Remote MCP relay so claude.ai and ChatGPT can work on an open document. The server never
-      models
+- [ ] OAuth on /mcp, so claude.ai and ChatGPT connectors can sign in without pasting a token
+- [ ] Agent tools that run SolidCraft commands in an open browser tab (rebuild-checked, with
+      screenshots), since the server never models
 - [ ] Keel Script: a typed successor to FeatureScript for custom features
 
 ## UI

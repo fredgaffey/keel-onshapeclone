@@ -1,0 +1,5 @@
+# Keel
+
+> Collaborative browser CAD (SolidCraft designs) on Cloudflare. AI agents can read and edit documents live, with or without an account.
+
+- [Agent guide](/agents.md): remote MCP at /mcp, the keel CLI (/keel.mjs), loose documents (no account, a key, deleted 30 days after creation), merging and conflicts, HTTP API.

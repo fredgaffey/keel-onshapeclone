@@ -12,14 +12,18 @@
 // - New features on both sides can take the same ids (each client numbers from `next_id`), so
 //   mine are renumbered above theirs, with references to them inside my new features rewritten.
 // - Dimension names (`param_names`, "d4") clash the same way and are renamed in my new features.
+//
+// `options.prefer` picks the winner of a field both sides changed: 'mine' (default) or 'theirs'.
+// Every conflict is listed twice: `conflicts` as sentences, `details` as
+// {path, kind: 'both-changed'|'deleted', base, mine, theirs, kept} for an agent or a UI to resolve.
 
-export function mergeDesigns(baseText, mineText, theirsText) {
-  if (mineText === baseText) return { text: theirsText, conflicts: [], changed: false };
-  if (theirsText === baseText || theirsText === mineText) return { text: mineText, conflicts: [], changed: false };
+export function mergeDesigns(baseText, mineText, theirsText, options = {}) {
+  if (mineText === baseText) return { text: theirsText, conflicts: [], details: [], changed: false };
+  if (theirsText === baseText || theirsText === mineText) return { text: mineText, conflicts: [], details: [], changed: false };
   const base = parse(baseText);
   const mine = parse(mineText);
   const theirs = parse(theirsText);
-  const conflicts = [];
+  const conflicts = Object.assign([], { prefer: options.prefer === 'theirs' ? 'theirs' : 'mine', details: [] });
 
   const out = {};
   const keys = new Set([...Object.keys(theirs), ...Object.keys(mine)]);
@@ -61,7 +65,7 @@ export function mergeDesigns(baseText, mineText, theirsText) {
   for (const [id, b] of B) {
     const m = M.get(id), t = T.get(id);
     if (!m || !t) {
-      if ((m && !eq(m, b)) || (t && !eq(t, b))) conflicts.push(`feature ${id}: deleted on one side, edited on the other (deleted)`);
+      if ((m && !eq(m, b)) || (t && !eq(t, b))) deleted(conflicts, `feature ${id}`, b, m, t);
       continue;
     }
     merged.set(id, merge3(b, m, t, `feature ${id}`, conflicts));
@@ -103,7 +107,7 @@ export function mergeDesigns(baseText, mineText, theirsText) {
   const ordered = {};
   for (const k of Object.keys(theirs)) if (k in out) ordered[k] = out[k];
   for (const k of Object.keys(out)) if (!(k in ordered)) ordered[k] = out[k];
-  return { text: stringify(ordered), conflicts, changed: true, renumbered: [...remap] };
+  return { text: stringify(ordered), conflicts: [...conflicts], details: conflicts.details, changed: true, renumbered: [...remap] };
 }
 
 // Integers past 2^53 (hashes, seeds) don't survive JSON.parse, so they travel as tagged strings.
@@ -125,13 +129,13 @@ function mergeParams(base, mine, theirs, conflicts) {
     const k = key(p);
     seen.add(k);
     const b = B.get(k), m = M.get(k);
-    if (b && !m) { if (!eq(p, b)) conflicts.push(`parameter ${k}: deleted on one side, edited on the other (deleted)`); continue; }
+    if (b && !m) { if (!eq(p, b)) deleted(conflicts, `parameter ${k}`, b, m, p); continue; }
     out.push(b && m ? merge3(b, m, p, `parameter ${k}`, conflicts) : p);
   }
   for (const p of mine) {
     const k = key(p);
     if (seen.has(k)) continue;
-    if (B.has(k)) { if (!eq(p, B.get(k))) conflicts.push(`parameter ${k}: deleted on one side, edited on the other (deleted)`); continue; }
+    if (B.has(k)) { if (!eq(p, B.get(k))) deleted(conflicts, `parameter ${k}`, B.get(k), p, undefined); continue; }
     out.push(p); // new on my side
   }
   return out;
@@ -148,8 +152,16 @@ function merge3(b, m, t, path, conflicts) {
     }
     return out;
   }
-  conflicts.push(`${path}: changed on both sides (kept the later edit)`);
-  return m;
+  const kept = conflicts.prefer;
+  conflicts.push(`${path}: changed on both sides (kept ${kept})`);
+  conflicts.details.push({ path, kind: 'both-changed', base: b, mine: m, theirs: t, kept });
+  return kept === 'theirs' ? t : m;
+}
+
+// A deletion beats a concurrent edit (re-adding is easy; resurrecting half a feature isn't).
+function deleted(conflicts, path, b, m, t) {
+  conflicts.push(`${path}: deleted on one side, edited on the other (deleted)`);
+  conflicts.details.push({ path, kind: 'deleted', base: b, mine: m ?? null, theirs: t ?? null, kept: 'deleted' });
 }
 
 // Keys whose integer values name a feature (or a sketch, which is a feature) in SolidCraft designs.

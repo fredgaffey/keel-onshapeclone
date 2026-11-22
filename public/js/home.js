@@ -76,6 +76,7 @@ async function showHome(offline = false) {
   document.getElementById('usermenu').onclick = (e) => menu(e.currentTarget, [
     [`Signed in as ${me.email}`, null],
     ...(dev ? [['Switch user (dev)…', () => { const n = prompt('Become which user? (made if new)', 'Bob'); if (n) location.href = `/api/dev/as?name=${encodeURIComponent(n)}`; }]] : []),
+    ['API tokens and agents…', () => tokensDialog()],
     ['Sign out', async () => { await api('/logout', { method: 'POST', body: {} }).catch(() => {}); location.reload(); }],
   ]);
   root.innerHTML = `
@@ -303,6 +304,66 @@ async function backupAll() {
 }
 
 // ---------------- small UI helpers ----------------
+
+// API tokens for agents and scripts, and how to connect them.
+async function tokensDialog() {
+  const dlg = document.createElement('dialog');
+  dlg.style.width = 'min(640px, calc(100% - 32px))';
+  document.body.append(dlg);
+  const site = location.origin;
+  const setup = (token) => `
+    <p style="margin:0 0 6px"><b>Claude Code, nothing to install</b> (the remote MCP server):</p>
+    <pre class="code">claude mcp add --transport http keel ${esc(site)}/mcp --header "Authorization: Bearer ${esc(token)}"</pre>
+    <p style="margin:10px 0 6px"><b>Or the <code>keel</code> command</b>, which also pulls documents to local <code>.sc</code> files, pushes them back and merges:</p>
+    <pre class="code">curl -fsSLO ${esc(site)}/keel.mjs
+node keel.mjs login --url ${esc(site)} --token ${esc(token)}
+claude mcp add keel -- node "$PWD/keel.mjs" mcp</pre>
+    <p class="meta" style="margin:8px 0 0">Or set <code>KEEL_URL</code> and <code>KEEL_TOKEN</code> in the agent's environment. Keep tokens out of files you commit.</p>`;
+  async function render(fresh = null) {
+    let tokens = [];
+    try { tokens = (await api('/tokens')).tokens; } catch (e) { toast(e.message, 'error'); }
+    dlg.innerHTML = `<form method="dialog">
+      <div class="head">API tokens and agents</div>
+      <div class="content">
+        <p class="meta" style="margin:0 0 12px">A token lets an agent (Claude Code, Codex, a script) open and edit your documents as you, from your computer. Each change it makes shows up live, labelled with the token's name. Revoke a token here at any time.</p>
+        ${fresh ? `<div class="newtoken"><p style="margin:0 0 6px"><b>Copy this token now.</b> It isn't shown again.</p>
+          <pre class="code" id="tok">${esc(fresh.token)}</pre><button type="button" class="btn" id="copy">Copy token</button>
+          <div style="margin-top:12px">${setup(fresh.token)}</div></div>` : ''}
+        <div class="field" style="display:flex;gap:8px;align-items:end;margin-top:12px">
+          <div style="flex:1"><label for="tname">New token</label><input type="text" id="tname" placeholder="Claude Code on my laptop" maxlength="80"></div>
+          <select id="tscope" style="width:auto"><option value="write">Read and write</option><option value="read">Read only</option></select>
+          <select id="tdays" style="width:auto"><option value="0">Never expires</option><option value="30">30 days</option><option value="90">90 days</option><option value="365">1 year</option></select>
+          <button type="button" class="btn primary" id="make">Create</button>
+        </div>
+        ${tokens.length ? tokens.filter((t) => !t.document_id).map((t) => `<div class="list-item"><div class="grow"><b>${esc(t.name)}</b> <span class="pill">${t.scope === 'read' ? 'read only' : 'read and write'}</span>
+          <div class="meta">…${esc(t.hint)} · made ${when(t.created_at)} · ${t.last_used_at ? `last used ${when(t.last_used_at)}` : 'never used'}${t.expires_at ? ` · expires ${new Date(t.expires_at).toLocaleDateString()}` : ''}</div></div>
+          <button type="button" class="btn danger" data-revoke="${esc(t.id)}">Revoke</button></div>`).join('') : '<p class="meta">No tokens yet.</p>'}
+        ${fresh ? '' : `<details style="margin-top:12px"><summary>How agents connect</summary>${setup('keel_YOUR_TOKEN')}</details>`}
+        <p class="meta" style="margin:12px 0 0">Agents without an account can still make <b>loose documents</b>: no sign-in, reached by a key, and deleted a set number of days after they're made. See <a href="/agents.md" target="_blank">/agents.md</a>.</p>
+      </div>
+      <div class="actions"><button class="btn" value="close">Done</button></div></form>`;
+    dlg.querySelector('#make').onclick = async () => {
+      const name = dlg.querySelector('#tname').value.trim();
+      if (!name) return dlg.querySelector('#tname').focus();
+      try {
+        const { token } = await api('/tokens', { method: 'POST', body: { name, scope: dlg.querySelector('#tscope').value, days: Number(dlg.querySelector('#tdays').value) } });
+        render(token);
+      } catch (e) { toast(e.message, 'error'); }
+    };
+    dlg.querySelector('#tname').onkeydown = (e) => { if (e.key === 'Enter') { e.preventDefault(); dlg.querySelector('#make').click(); } };
+    const copy = dlg.querySelector('#copy');
+    if (copy) copy.onclick = async () => { await navigator.clipboard.writeText(fresh.token).catch(() => {}); copy.textContent = 'Copied'; };
+    for (const b of dlg.querySelectorAll('[data-revoke]')) {
+      b.onclick = async () => {
+        if (!confirm('Revoke this token? Agents using it stop working at once.')) return;
+        try { await api(`/tokens/${b.dataset.revoke}`, { method: 'DELETE' }); render(); } catch (e) { toast(e.message, 'error'); }
+      };
+    }
+  }
+  dlg.addEventListener('close', () => dlg.remove());
+  await render();
+  dlg.showModal();
+}
 
 function ask(title, value, action) {
   return new Promise((resolve) => {

@@ -8,6 +8,11 @@
   "main": "worker/index.js",
   "compatibility_date": "2026-06-24",
   "routes": [{ "pattern": "keel.pebnum.com", "custom_domain": true }],
+  "workers_dev": true, // keep the *.workers.dev address too
+  // Hourly: delete loose documents past their deletion date (LOOSE_DAYS).
+  "triggers": { "crons": ["17 * * * *"] },
+  // Loose documents can be made without an account, so limit how fast one address can make them.
+  "ratelimits": [{ "name": "LOOSE_LIMIT", "namespace_id": "1001", "simple": { "limit": 10, "period": 60 } }],
   "assets": {
     "directory": "./public",
     "binding": "ASSETS",
@@ -22,6 +27,10 @@
   "vars": {
     // "open": anyone who reaches the site can make an account. "closed": none can (put the site
     // behind Cloudflare Access and make accounts while it's open, or switch it back briefly).
-    "SIGNUP": "open"
+    "SIGNUP": "open",
+    // "open": anyone (an agent, say) can make a loose document with no account: it gets a key
+    // instead, and is deleted LOOSE_DAYS days after it's made. "closed": accounts only.
+    "LOOSE": "open",
+    "LOOSE_DAYS": "30"
   }
 }

@@ -10,12 +10,22 @@
 // sent yet). The design is also written to IndexedDB after every change, so closing the tab,
 // losing the connection or working on a plane loses nothing: it is sent when we're back.
 
-import { api, esc, when, toast, initials, registerServiceWorker } from './api.js';
+import { api, esc, when, toast, initials, registerServiceWorker, useKey } from './api.js';
 import * as local from './local.js';
 import { mergeDesigns } from './merge.js';
 
 const docId = location.pathname.split('/')[2];
 const isLocalOnly = docId.startsWith('local-');
+// A loose document (no account) is opened with its key in the address's #fragment, which never
+// reaches the server's logs. It's remembered on this device so the document reopens without it.
+const docKey = (() => {
+  const fromHash = /(?:^#|&)key=(keel_[A-Za-z0-9]+)/.exec(location.hash)?.[1];
+  try {
+    if (fromHash) localStorage.setItem(`keel-key:${docId}`, fromHash);
+    return fromHash || localStorage.getItem(`keel-key:${docId}`);
+  } catch { return fromHash || null; }
+})();
+if (docKey) useKey(docKey);
 const $ = (id) => document.getElementById(id);
 
 const S = {
@@ -55,8 +65,14 @@ async function boot() {
     const { document: d } = await api(`/docs/${docId}`);
     S.name = d.name;
     S.role = d.role === 'view' ? 'view' : 'edit';
+    S.expires = d.expires_at || null;
     S.me = (await api('/me')).user;
   } catch (e) {
+    if (e.status === 401 && docKey) {
+      $('loading-text').textContent = `${e.message} Loose documents are deleted a set number of days after they're made.`;
+      $('loading').querySelector('.spinner')?.remove();
+      return;
+    }
     if (e.status === 401) return location.replace('/');
     if (e.status === 404 && !isLocalOnly) {
       $('loading-text').textContent = e.message;
@@ -238,7 +254,7 @@ async function keepConflictCopy(text) {
 
 function connect() {
   const proto = location.protocol === 'https:' ? 'wss' : 'ws';
-  const ws = new WebSocket(`${proto}://${location.host}/api/docs/${docId}/ws`);
+  const ws = new WebSocket(`${proto}://${location.host}/api/docs/${docId}/ws${docKey ? `?key=${encodeURIComponent(docKey)}` : ''}`);
   S.ws = ws;
   let pinger;
   ws.onopen = () => {
@@ -256,6 +272,10 @@ function connect() {
     S.peers = [];
     renderPeers();
     status();
+    if (ev.code === 4410) {
+      banner('This loose document has been deleted (it reached its deletion date).');
+      return;
+    }
     if (ev.code === 4403) {
       banner('Your access to this document was changed. Reloading…');
       setTimeout(() => location.reload(), 1500);
@@ -291,6 +311,7 @@ async function onMessage(msg) {
       }
       hideLoading();
       if (S.role === 'view') banner('View only: you can look around and measure, but changes aren\'t saved.');
+      else if (S.expires) banner(`Loose document, with no account: it will be deleted on ${new Date(S.expires).toLocaleString(undefined, { dateStyle: 'full', timeStyle: 'short' })}. Anyone with this page's address can edit it. Download it to keep a copy.`);
       break;
     }
     case 'remote':

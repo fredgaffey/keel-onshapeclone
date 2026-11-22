@@ -20,6 +20,13 @@ running as WebAssembly on your own device. Keel adds what a cloud CAD service ne
 - **Backup to a folder:** in Chrome and Edge, Keel also writes each document to a folder you
   choose on your computer whenever it's saved.
 - **Installable** as an app, which also works offline.
+- **AI agents:**
+  - Claude Code, Codex or a script works on your documents with an API token, seen live by
+    everyone with the document open.
+  - Agents can also use **loose documents**, which need no account. They're reached by a key and
+    deleted 30 days after they're made.
+  - The `keel` command works on local `.sc` files too: pull, push, merge, and resolve conflicts.
+  - [Agent guide](public/agents.md), also served at `/agents.md`.
 
 > Keel is an independent project. It is not affiliated with or endorsed by PTC or Onshape®,
 > Autodesk or Fusion 360®, or Tangency Labs (SolidCraft). Those names belong to their owners.
@@ -71,7 +78,7 @@ npm install
 scripts/stage-cad.sh            # copy SolidCraft's dist/web into public/cad, put its WebAssembly in local R2
                                 # (BUILD=1 rebuilds SolidCraft first: needs rustup + trunk, ~15 min)
 npm run db:local                # create the local D1 tables
-npm run dev                     # http://127.0.0.1:8787
+npm run dev                     # http://127.0.0.1:8787 (--local-upstream keeps local links local)
 ```
 
 **Dev mode (no sign-in):** put `DEV_AUTH=1` in `.dev.vars`, which git ignores. Then:
@@ -82,11 +89,40 @@ npm run dev                     # http://127.0.0.1:8787
 - It only works on `localhost` and `127.0.0.1`, so a deployment with the variable set by mistake
   still requires sign-in.
 
+## AI agents
+
+```sh
+# Claude Code, nothing to install (token from: your name → API tokens and agents)
+claude mcp add --transport http keel https://keel.pebnum.com/mcp --header "Authorization: Bearer keel_..."
+# no account: leave the header off, and create_document makes loose documents
+# local files too: the keel command (public/keel.mjs, built from cli/ by `npm run build:cli`)
+curl -fsSLO https://keel.pebnum.com/keel.mjs && node keel.mjs help
+```
+
+- **Tokens:**
+  - Tokens are made and revoked on the website, never with another token. They can be read-only
+    and can expire.
+  - Changes an agent makes are labelled "Name (token name)".
+- **HTTP writes:**
+  - Each write names the version it started from. Keel merges it with anything newer, using the
+    same merge as the browser, run in the document's room.
+  - A field both sides changed goes to `mine` or `theirs`. With `ask`, nothing is saved and the
+    conflicts come back so they can be resolved.
+- **Loose documents:**
+  - `POST /api/loose` with no account. A guest owns the document; its key is a token that reaches
+    only that one document.
+  - Each is **deleted `LOOSE_DAYS` (30) days after it's made**. An hourly scheduled job deletes the
+    document, its versions and its room.
+  - `LOOSE: "closed"` turns them off. Making them is limited to 10 a minute per IP address.
+
+See [the agent guide](public/agents.md) for the tools and the merge rules.
+
 ## Tests
 
 ```sh
 npm test                        # unit tests for the merge
 npm run e2e                     # with `npm run dev` running: three browsers, see below
+npm run test:agents             # with `npm run dev` running: tokens, merging, loose documents, MCP, the CLI
 ```
 
 The end-to-end test (`tests/e2e.mjs`) drives real browsers through the real app and these
@@ -110,7 +146,7 @@ These steps run once, on your account:
 wrangler login
 wrangler d1 create keel                 # put the database_id it prints into wrangler.jsonc
 wrangler r2 bucket create keel-files    # R2 must be enabled in the dashboard first
-wrangler d1 migrations apply keel --remote
+wrangler d1 migrations apply keel --remote   # again whenever migrations/ gains a file
 scripts/stage-cad.sh --remote           # upload SolidCraft's WebAssembly to R2
 wrangler deploy
 ```
