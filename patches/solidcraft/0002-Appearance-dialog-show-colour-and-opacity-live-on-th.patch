@@ -1,0 +1,206 @@
+From 8f19afe01c68860a30bef766e8c1c7e5f096e3e4 Mon Sep 17 00:00:00 2001
+From: Keel <noreply@anthropic.com>
+Date: Sun, 22 Nov 2026 22:31:19 +1100
+Subject: [PATCH] Appearance dialog: show colour and opacity live on the picked
+ objects
+
+The opacity slider, colour picker and surface settings changed nothing visible until Apply or OK.
+Each change now shows on the picked bodies or faces at once: it goes back to a checkpoint taken
+before the first change and applies the new look, so the history holds one step. OK keeps it,
+Cancel (or Escape) goes back to the checkpoint and leaves no step. Apply and Remove override
+work as before.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ crates/ui-egui/src/dialogs.rs            |  3 +
+ crates/ui-egui/src/dialogs_appearance.rs | 85 ++++++++++++++++++++++++
+ 2 files changed, 88 insertions(+)
+
+diff --git a/crates/ui-egui/src/dialogs.rs b/crates/ui-egui/src/dialogs.rs
+index f7497a79..c547d8ee 100644
+--- a/crates/ui-egui/src/dialogs.rs
++++ b/crates/ui-egui/src/dialogs.rs
+@@ -4809,6 +4809,9 @@ pub fn cancel(app: &mut SolveApp) {
+         if let Kind::Text(k) = &mut d.kind {
+             crate::sketch_text::closed(app, k, false);
+         }
++        if let Kind::Appearance(k) = &mut d.kind {
++            crate::dialogs_appearance::end_preview(app, k);
++        }
+         app.dialog = Some(d);
+     }
+     if let Some(d) = app.dialog.take()
+diff --git a/crates/ui-egui/src/dialogs_appearance.rs b/crates/ui-egui/src/dialogs_appearance.rs
+index 01ae0022..1f7695ca 100644
+--- a/crates/ui-egui/src/dialogs_appearance.rs
++++ b/crates/ui-egui/src/dialogs_appearance.rs
+@@ -193,6 +193,11 @@ pub struct Ap {
+     pub applied: Option<Value>,
+     /// What the last drop or Apply did.
+     pub note: Option<String>,
++    /// Live preview: the look has been changed in this dialog, so the picked objects show it
++    /// at once (#live-appearance). `live` is the checkpoint from before the preview and the
++    /// look it applied; Cancel goes back to the checkpoint, OK keeps the one step.
++    pub touched: bool,
++    pub live: Option<(u64, Value)>,
+ }
+ 
+ /// The dialog for the Appearance command.
+@@ -233,12 +238,52 @@ pub fn start(app: &SolveApp, id: &str) -> Option<(Kind, Vec<SelInput>)> {
+                 remove_override: false,
+                 applied: None,
+                 note: None,
++                touched: false,
++                live: None,
+             }),
+             vec![SelInput::new("Objects", if faces { FACES } else { BODIES }, true)],
+         )
+     })
+ }
+ 
++/// Show the dialog's look on the picked objects as it changes (the opacity slider, the colour
++/// picker, the surface settings), not only on Apply or OK. Each change goes back to the
++/// checkpoint taken before the first one and applies the new look, so the history holds one
++/// step: OK keeps it (and runs nothing more), Cancel goes back to the checkpoint.
++fn live_preview(app: &mut SolveApp, k: &mut Ap, picked: &[Sel]) {
++    if !k.touched || k.remove_override || k.local.materials {
++        return;
++    }
++    let want = selected_params(k, picked);
++    if want.as_ref() == k.live.as_ref().map(|(_, p)| p) {
++        return;
++    }
++    if let Some((id, _)) = k.live.take() {
++        let _ = app.session.restore_checkpoint(id);
++    }
++    k.applied = None;
++    let Some(p) = want else { return };
++    let id = app.session.checkpoint();
++    match app.run("appearance.assign", p.clone()) {
++        Ok(_) => {
++            k.applied = Some(p.clone());
++            k.live = Some((id, p));
++        }
++        // A look that can't be applied yet (no objects it fits): no preview; Apply says why.
++        Err(_) => {
++            let _ = app.session.restore_checkpoint(id);
++        }
++    }
++}
++
++/// Undo a live preview's step (before Apply, Remove override or Cancel run their own).
++pub(crate) fn end_preview(app: &mut SolveApp, k: &mut Ap) {
++    if let Some((id, _)) = k.live.take() {
++        let _ = app.session.restore_checkpoint(id);
++        k.applied = None;
++    }
++}
++
+ /// The command giving `targets` (bodies or faces) a look.
+ pub(crate) fn apply_params(targets: &[Sel], color: [u8; 3], opacity: f64, look: Option<&str>, pbr: Option<PbrParameters>) -> Option<Value> {
+     let bodies: Vec<String> = targets.iter().filter_map(|x| if let Sel::Body { name } = x { Some(name.clone()) } else { None }).collect();
+@@ -407,6 +452,7 @@ pub fn rows(app: &mut SolveApp, ui: &mut egui::Ui, k: &mut Ap, inputs: &mut [Sel
+             detach_preset(k);
+             k.look = None;
+             k.remove_override = false;
++            k.touched = true;
+         }
+         ui_kit::text(ui, &k.look.clone().unwrap_or_else(|| hex(k.color)), ui_kit::Text::MonoCell);
+     });
+@@ -414,6 +460,7 @@ pub fn rows(app: &mut SolveApp, ui: &mut egui::Ui, k: &mut Ap, inputs: &mut [Sel
+         if ui.add_enabled_ui(k.pbr.is_none(), |ui| ui_kit::slider(ui, &mut k.opacity, 0.0..=1.0, Default::default())).inner.changed() {
+             detach_preset(k);
+             k.remove_override = false;
++            k.touched = true;
+         }
+     });
+     let mut enabled = k.pbr.is_some();
+@@ -422,6 +469,7 @@ pub fn rows(app: &mut SolveApp, ui: &mut egui::Ui, k: &mut Ap, inputs: &mut [Sel
+     crate::scenario::publish_handle("appearance:pbr", toggle.rect.center());
+     if toggle.changed() {
+         detach_preset(k);
++        k.touched = true;
+         k.pbr = enabled.then(PbrParameters::default);
+         if enabled {
+             k.opacity = 1.0;
+@@ -442,6 +490,7 @@ pub fn rows(app: &mut SolveApp, ui: &mut egui::Ui, k: &mut Ap, inputs: &mut [Sel
+             if response.changed() {
+                 detach_preset(k);
+                 k.remove_override = false;
++                k.touched = true;
+             }
+         }
+         if let Ok(parameters) = PbrParameters::new(metallic, roughness, ior) {
+@@ -449,15 +498,18 @@ pub fn rows(app: &mut SolveApp, ui: &mut egui::Ui, k: &mut Ap, inputs: &mut [Sel
+         }
+     }
+     let picked: Vec<Sel> = inputs.first().map(|i| i.items.clone()).unwrap_or_default();
++    live_preview(app, k, &picked);
+     ui.horizontal_wrapped(|ui| {
+         let has_target = !picked.is_empty() || k.component.is_some();
+         if ui_kit::button(ui, "Apply to selection", ui_kit::Button::Enabled(has_target)).clicked()
+             && let Some(p) = selected_params(k, &picked)
+         {
++            end_preview(app, k);
+             k.remove_override = false;
+             k.note = Some(match app.run("appearance.assign", p.clone()) {
+                 Ok(_) => {
+                     k.applied = Some(p);
++                    k.touched = false; // applied for good: preview again only after another change
+                     "Appearance applied".into()
+                 }
+                 Err(e) => e,
+@@ -468,10 +520,12 @@ pub fn rows(app: &mut SolveApp, ui: &mut egui::Ui, k: &mut Ap, inputs: &mut [Sel
+             .clicked()
+             && let Some(p) = clear_params(k, &picked)
+         {
++            end_preview(app, k);
+             k.note = Some(match app.run("appearance.assign", p) {
+                 Ok(_) => {
+                     k.remove_override = true;
+                     k.applied = None;
++                    k.touched = false;
+                     "Inherited appearance restored".into()
+                 }
+                 Err(e) => e,
+@@ -753,6 +807,37 @@ mod tests {
+         assert_eq!(before.search, after.search);
+     }
+ 
++    #[test]
++    fn opacity_and_colour_show_live_and_cancel_puts_them_back() {
++        let mut h = crate::scenario::Harness::new();
++        h.app.run("solid.box", json!({"length":10,"width":10,"height":10})).unwrap();
++        h.app.run("appearance.assign", json!({"bodies":["Body1"],"color":"#abcdef","opacity":1.0})).unwrap();
++        let undo_before = h.app.session.undo.len();
++        for ok in [false, true] {
++            h.app.session.selection = vec![Sel::Body { name: "Body1".into() }];
++            h.app.start("appearance.assign");
++            h.frames(2);
++            for opacity in [0.8, 0.5, 0.3] {
++                let Kind::Appearance(k) = &mut h.app.dialog.as_mut().unwrap().kind else { panic!("appearance dialog") };
++                k.opacity = opacity;
++                k.touched = true;
++                h.frames(1);
++                assert_eq!(h.app.session.doc.appearances.bodies["Body1"].opacity, opacity, "live while the dialog is open");
++                assert_eq!(h.app.session.undo.len(), undo_before + 1, "one step, not one per change");
++            }
++            h.step(&json!({"key": if ok { "Enter" } else { "Escape" }})).unwrap();
++            assert!(h.app.dialog.is_none());
++            let kept = h.app.session.doc.appearances.bodies["Body1"].opacity;
++            if ok {
++                assert_eq!(kept, 0.3, "OK keeps the look");
++                assert_eq!(h.app.session.undo.len(), undo_before + 1, "as one undo step");
++            } else {
++                assert_eq!(kept, 1.0, "Cancel puts it back");
++                assert_eq!(h.app.session.undo.len(), undo_before, "and leaves no step");
++            }
++        }
++    }
++
+     #[test]
+     fn real_frames_and_unchanged_apply_keep_precise_opacity() {
+         let mut h = crate::scenario::Harness::new();
+-- 
+2.55.0
+

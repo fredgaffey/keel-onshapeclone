@@ -215,8 +215,10 @@ Tangency Labs' permission, or Keel's own UI kit, theme and icons.
 
 ## Limits worth knowing
 
-- **Keel carries its own fixes to SolidCraft** in `patches/solidcraft/`. Currently there is one:
-  holding the up or down arrow no longer flips the view at the pole.
+- **Keel carries its own fixes to SolidCraft** in `patches/solidcraft/`. Currently there are two:
+  - Holding the up or down arrow no longer flips the view at the pole.
+  - The Appearance dialog shows colour and opacity live while you change them. OK keeps the
+    change as one undo step; Cancel puts the model back.
   - `BUILD=1 scripts/stage-cad.sh` applies each patch before building, so updating the SolidCraft
     checkout can't silently drop one.
   - If a patch stops applying because upstream fixed the bug, the build says so. Delete that patch.
