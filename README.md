@@ -61,6 +61,39 @@ designs in and out through SolidCraft's
 - If a merged design fails to rebuild, Keel keeps the other person's design and saves yours as a
   "conflicted copy" document.
 
+
+## Default scripts
+
+Keel ships parametric generators any document can use. They build proper CAD (sketches, lofts,
+extrudes, patterns), not meshes, so the result stays editable in the timeline.
+
+- **In Keel:** open a document, click **Scripts**, pick a script, set its parameters and click
+  **Create**. The panel runs the script's commands one at a time through SolidCraft's command API
+  (`window.solidcraft.execute(command, params)`), in the same queue as Keel's own engine work.
+- **Headless:** print the command list and run it with the SolidCraft CLI:
+
+  ```sh
+  node scripts/run-script.mjs propeller blades=3 diameter=152.4 pitch=4 > prop.json
+  solidcraft-cli run prop.json --param-check strict --out prop.step --out prop.stl
+  solidcraft-cli eval prop.json        # bodies, volume, mass
+  ```
+
+  `node scripts/run-script.mjs` with no arguments lists the scripts and their parameters.
+
+Scripts live in [`public/js/scripts/`](public/js/scripts/): plain ES modules, each
+`{id, name, description, params, build(params) → [{command, params}]}`, registered in `index.js`.
+`build` is pure, so the same list runs in the browser, in tests and in the CLI.
+
+**Propeller** (`propeller`): diameter, blade count, hub, bore, constant geometric pitch (or root/tip
+pitch angles), chord at the root cutout, 0.75 R and the tip, Clark-Y or NACA 4-digit sections with
+root/tip thickness, number of sections, round or square tip, CW/CCW. Each blade is lofted through
+airfoil sections (closed, periodic fit-point splines with a rounded trailing edge) on planes along
+the span, twisted to the pitch angle and stacked on the quarter chord. A thick neck centred in the
+hub, a flare at the hub wall and smoothly blended stations carry it into the root section, so the
+blades are one solid with the hub. Examples with pictures, STEP and STL: [`examples/propeller/`](examples/propeller/).
+SolidCraft 0.46's fillet can't round the blade-hub seam (the loft has one face per spline span), so
+the `root_flare` parameter blends it in the loft instead.
+
 ## Run it locally
 
 You need Node 20+, [wrangler](https://developers.cloudflare.com/workers/wrangler/), `brotli`,

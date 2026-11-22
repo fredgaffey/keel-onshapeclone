@@ -428,6 +428,14 @@ function wireBar() {
     const { install } = await import('./flexblade.js');
     S.flexblade = install({ app: S.cad, frame: $('cad'), run: serial });
   };
+  // Scripts: Keel's default parametric generators; each runs as SolidCraft commands through `serial`.
+  $('scripts-btn').hidden = S.role === 'view';
+  $('scripts-btn').onclick = async () => {
+    if (!S.cad) return toast('The modeller is still loading', 'error');
+    if (S.scripts) return S.scripts.toggle();
+    const { install } = await import('./scripts-panel.js');
+    S.scripts = install({ app: S.cad, frame: $('cad'), run: serial });
+  };
   $('download-btn').onclick = () => serial(async () => {
     await readEngine();
     local.download(local.fileName(S.name, docId), S.known);
