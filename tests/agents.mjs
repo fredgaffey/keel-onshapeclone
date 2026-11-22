@@ -106,11 +106,14 @@ await step('HTTP writes merge, with mine, theirs and ask', async () => {
 
 let looseKey, looseId;
 await step('loose documents: no account, a key, one document, a deletion date', async () => {
-  const r = (await http('/api/loose', { method: 'POST', body: { name: 'Scratch', by: 'Claude' }, expect: 201 })).data;
+  const made = await http('/api/loose', { method: 'POST', body: { name: 'Scratch', by: 'Claude' }, expect: 201 });
+  const r = made.data;
+  // The server's clock, not this computer's (which may be off).
+  const serverNow = Date.parse(made.res.headers.get('date')) || Date.now();
   looseKey = r.key; looseId = r.document.id;
   assert.match(r.url, new RegExp(`/d/${looseId}#key=keel_`));
   const days = (await http('/api/config')).data.loose_days;
-  assert.ok(Math.abs(r.document.expires_at - (Date.now() + days * 86400_000)) < 120_000, 'deleted LOOSE_DAYS after creation');
+  assert.ok(Math.abs(r.document.expires_at - (serverNow + days * 86400_000)) < 120_000, 'deleted LOOSE_DAYS after creation');
   assert.match(r.note, /DELETED/);
   const doc = (await http(`/api/docs/${looseId}`, { token: looseKey })).data.document;
   assert.equal(doc.role, 'owner');
