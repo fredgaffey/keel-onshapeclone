@@ -18,6 +18,8 @@
 //
 // Account:  keel login --url https://<site> [--token keel_...] | logout | whoami | ls
 // Other:    keel cat <id|key> | version <id|key> <name> | open <id|key>
+//           keel host <id|key|file.sc>   open it in headless Chrome for agents: kernel checks,
+//                                        screenshots and modelling commands (CHROME= to choose)
 // Agents:   keel mcp    (an MCP server on stdio; Claude Code: claude mcp add keel -- node /path/to/keel.mjs mcp)
 //
 // The token comes from KEEL_TOKEN or ~/.config/keel/config.json (`keel login`, readable only by
@@ -27,6 +29,8 @@ import { readFileSync, writeFileSync, mkdirSync, existsSync, renameSync } from '
 import { homedir } from 'node:os';
 import { join, dirname, basename, resolve } from 'node:path';
 import { createInterface } from 'node:readline';
+import { spawn } from 'node:child_process';
+import { tmpdir } from 'node:os';
 import { mergeDesigns } from '../public/js/merge.js';
 import { TOOLS, DESIGN_NOTE, runTool, handleRpc } from '../public/js/agent-tools.js';
 
@@ -193,6 +197,45 @@ async function create(name, { from, loose = false, by } = {}) {
   return { id, name, key, url: docUrl(cfg.url, id, key), file, expires_at: expires, note };
 }
 
+// ---------------------------------------------------------------- agent host
+// A headless Chrome with the document open in host mode (/d/<id>?host=1), so agents' kernel
+// checks, screenshots and modelling commands have a tab to run in. It runs until stopped.
+
+function findChrome() {
+  const candidates = [
+    process.env.CHROME,
+    '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome',
+    '/Applications/Chromium.app/Contents/MacOS/Chromium',
+    '/Applications/Microsoft Edge.app/Contents/MacOS/Microsoft Edge',
+    '/usr/bin/google-chrome', '/usr/bin/google-chrome-stable', '/usr/bin/chromium', '/usr/bin/chromium-browser', '/snap/bin/chromium',
+    'C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe',
+  ].filter(Boolean);
+  const hit = candidates.find((p) => existsSync(p));
+  if (!hit) throw new KeelError('No Chrome found. Install Chrome or Chromium, or set CHROME to its path.');
+  return hit;
+}
+
+async function host(ref, { detached = false } = {}) {
+  let site = loadConfig().url, id, key;
+  if (ref && ref.endsWith('.sc') && existsSync(sidecar(resolve(ref)))) {
+    const link = readLink(resolve(ref));
+    ({ id } = link); key = link.key; site = link.url;
+  } else {
+    if (!ref) throw new KeelError('Which document? Give its id, key or linked file.');
+    ({ id, key } = await target(ref, site));
+  }
+  const credential = key || loadConfig().token;
+  if (!credential) throw new KeelError('Hosting an account document needs a token: run `keel login` or set KEEL_TOKEN.');
+  const url = `${site}/d/${id}?host=1#key=${credential}`;
+  const profile = join(tmpdir(), `keel-host-${id}`);
+  mkdirSync(profile, { recursive: true });
+  const chrome = findChrome();
+  const child = spawn(chrome, ['--headless=new', '--enable-unsafe-webgpu', '--enable-features=Vulkan', '--disable-background-timer-throttling', '--disable-renderer-backgrounding',
+    '--no-first-run', '--no-default-browser-check', `--user-data-dir=${profile}`, '--window-size=1400,900', url], { detached, stdio: 'ignore' });
+  if (detached) child.unref();
+  return { id, pid: child.pid, chrome, child, url: `${site}/d/${id}` };
+}
+
 // ---------------------------------------------------------------- command line
 
 const HELP = (() => {
@@ -332,6 +375,13 @@ async function cli(argv) {
       console.log('This checks the file\'s structure only. Opening it in SolidCraft (or `solidcraft-cli`) rebuilds it with the real kernel.');
       return;
     }
+    case 'host': {
+      need(1, 'host <id|key|file.sc>');
+      const h = await host(args[0]);
+      console.log(`Hosting ${h.url} for agents in headless Chrome (pid ${h.pid}). The first start downloads the modeller (~32 MB). Ctrl-C stops it.`);
+      await new Promise((res) => { h.child.on('exit', res); process.on('SIGINT', () => { h.child.kill(); res(); }); });
+      return;
+    }
     case 'mcp': return serveMcp();
     case undefined: case 'help': case '--help': case '-h': console.log(HELP); return;
     case '--version': console.log(VERSION); return;
@@ -364,6 +414,11 @@ const LOCAL_TOOLS = [
     inputSchema: { type: 'object', properties: { path: { type: 'string' }, name: { type: 'string' }, loose: { type: 'boolean' }, by: { type: 'string' } }, required: ['path'] },
   },
   {
+    name: 'start_host',
+    description: 'Open a document in headless Chrome on this computer as an agent tab, so inspect_model, screenshot, list_commands and run_commands work without anyone having it open. It keeps running in the background; the first start takes up to a minute (the modeller downloads and starts).',
+    inputSchema: { type: 'object', properties: { id: { type: 'string', description: 'Document id, key, or a linked .sc file.' } }, required: ['id'] },
+  },
+  {
     name: 'merge_files',
     description: 'Three-way merge of local design files, no server needed: base (the common ancestor), mine and theirs. Writes the result to out (or returns it) and lists each conflict with its base, mine and theirs values; prefer picks the winner of a field both changed.',
     inputSchema: { type: 'object', properties: { base: { type: 'string' }, mine: { type: 'string' }, theirs: { type: 'string' }, out: { type: 'string' }, prefer: { type: 'string', enum: ['mine', 'theirs'] } }, required: ['base', 'mine', 'theirs'] },
@@ -377,6 +432,11 @@ function serveMcp() {
     signedIn: !!cfg.token,
     reads: new Map(),
     call: (path, opts = {}) => call(path, opts),
+    async asset(path) {
+      const res = await fetch(cfg.url + path).catch((e) => { throw new KeelError(`Can't reach ${cfg.url}: ${e.message}`); });
+      if (!res.ok) throw new KeelError(`${path}: HTTP ${res.status}`);
+      return res.json();
+    },
   };
   const run = async (name, a) => {
     switch (name) {
@@ -384,6 +444,10 @@ function serveMcp() {
       case 'push_document': return push(a.path, { onConflict: a.on_conflict || 'mine' });
       case 'file_status': return status(a.path);
       case 'upload_file': return create(a.name || basename(a.path).replace(/\.sc$/, ''), { from: a.path, loose: !!a.loose, by: a.by });
+      case 'start_host': {
+        const h = await host(a.id, { detached: true });
+        return { hosting: h.url, pid: h.pid, note: 'Give it up to a minute to load, then use inspect_model, screenshot or run_commands. Stop it by killing the pid.' };
+      }
       case 'merge_files': {
         const [b, m, t] = [a.base, a.mine, a.theirs].map((p) => readFileSync(p, 'utf8'));
         const r = mergeDesigns(b, m, t, { prefer: a.prefer === 'theirs' ? 'theirs' : 'mine' });

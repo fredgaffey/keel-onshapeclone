@@ -58,6 +58,9 @@ async function showAuth(mode) {
     if (up) body.name = form.name.value;
     try {
       me = (await api(up ? '/signup' : '/login', { method: 'POST', body })).user;
+      // Signing in on the way somewhere (an OAuth consent page, say): go back there. Same site only.
+      const next = new URLSearchParams(location.search).get('next');
+      if (next && next.startsWith('/') && !next.startsWith('//')) return location.replace(next);
       await local.setKv('me', me);
       showHome();
     } catch (x) {

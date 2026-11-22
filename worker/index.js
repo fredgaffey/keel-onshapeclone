@@ -3,6 +3,7 @@
 
 import { HttpError, checkPassword, createGuest, createToken, createUser, currentUser, endSession, listTokens, looseDays, randomId, revokeToken, startSession, validEmail } from './auth.js';
 import { mcp } from './mcp.js';
+import { isOAuthPath, oauth } from './oauth.js';
 
 export { DocRoom } from './room.js';
 
@@ -20,7 +21,8 @@ async function handle(request, env) {
     const url = new URL(request.url);
     try {
       if (url.pathname.startsWith('/api/')) return await api(request, env, url);
-      if (url.pathname === '/mcp') return await mcp(request, env, url, (req) => handle(req, env));
+      if (url.pathname === '/mcp' || url.pathname === '/mcp/loose') return await mcp(request, env, url, (req) => handle(req, env), { loose: url.pathname === '/mcp/loose' });
+      if (isOAuthPath(url.pathname)) return await oauth(request, env, url);
       if (url.pathname.startsWith('/cad/') && url.pathname.endsWith('_bg.wasm')) return await wasm(env, url);
       if (/^\/d\/[A-Za-z0-9]+\/?$/.test(url.pathname)) return env.ASSETS.fetch(new Request(new URL('/doc', url), request));
       return env.ASSETS.fetch(request);
@@ -240,7 +242,22 @@ async function api(request, env, url) {
     return stub.fetch('https://room/ws', request);
   }
   if (sub === '/content' && method === 'GET') {
+    if (user.via === 'token') await stub.fetch('https://room/seen', { method: 'POST', body: JSON.stringify({ activity: 'reading' }) });
     return stub.fetch('https://room/state');
+  }
+  if (sub === '/edit' && method === 'POST') {
+    // Typed edits for agents (public/js/design-edit.js), applied to the current design.
+    needEdit();
+    const { edits } = await body(request);
+    return stub.fetch('https://room/edit', { method: 'POST', body: JSON.stringify({ edits }) });
+  }
+  if (sub === '/changes' && method === 'GET') {
+    return stub.fetch(`https://room/changes?since=${encodeURIComponent(url.searchParams.get('since') ?? '')}`);
+  }
+  if (sub === '/run' && method === 'POST') {
+    // SolidCraft commands, inspections and screenshots, run by a browser tab on this document.
+    const b = await body(request);
+    return stub.fetch('https://room/run', { method: 'POST', body: JSON.stringify({ calls: b.calls, at_seq: b.at_seq, timeout_ms: b.timeout_ms }) });
   }
   if (sub === '/content' && method === 'PUT') {
     // With `base` (the seq the change started from) the room merges it with anything newer (see
@@ -313,7 +330,7 @@ async function api(request, env, url) {
 
 function room(env, docId, user, role) {
   const stub = env.ROOMS.get(env.ROOMS.idFromName(docId));
-  const headers = { 'x-doc-id': docId, 'x-user': JSON.stringify({ id: user.id, name: user.via === 'token' && !user.token.document_id ? `${user.name} (${user.token.name})` : user.name }), 'x-role': role === 'owner' ? 'edit' : role };
+  const headers = { 'x-doc-id': docId, 'x-user': JSON.stringify({ id: user.id, name: user.via === 'token' && !user.token.document_id ? `${user.name} (${user.token.name})` : user.name, agent: user.via === 'token' }), 'x-role': role === 'owner' ? 'edit' : role };
   return {
     fetch(target, init) {
       const req = init instanceof Request ? new Request(target, init) : new Request(target, init);

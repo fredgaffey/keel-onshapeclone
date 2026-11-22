@@ -7,10 +7,13 @@
 // sends again. WebSockets use the hibernation API, so an idle room costs nothing.
 
 import { mergeDesigns } from '../public/js/merge.js';
+import { applyEdits, diffDesigns } from '../public/js/design-edit.js';
 
 const CHUNK = 1_000_000; // storage values are capped at 2 MB; designs can be bigger
 const MAX_TEXT = 16 * 1024 * 1024; // the most SolidCraft's document.import accepts
 const AUTO_VERSION_EVERY = 100; // updates between automatic versions
+const AGENT_SHOWN_MS = 120_000; // an agent working over HTTP shows among the people here this long after its last call
+const AGENT_SESSION_MS = 10 * 60_000; // an agent's first write after this long idle saves a version first
 const HISTORY = 50; // recent designs kept (when under CHUNK), so an HTTP update naming only its base can merge
 const COLORS = ['#e4572e', '#2e86ab', '#7d3c98', '#17a398', '#f2a541', '#d6336c', '#3b8c3b', '#4f5d75'];
 
@@ -19,6 +22,26 @@ export class DocRoom {
     this.ctx = ctx;
     this.env = env;
     this.head = null; // {seq, text, by, at}
+    this.agents = new Map(); // name -> {id, at, activity}: agents working over HTTP (MCP, CLI)
+    this.runs = new Map(); // rid -> resolve: agent calls waiting for a host tab's reply
+  }
+
+  // An agent (a token or key, not a browser) touched the document: show it, and before its first
+  // write in a while, save a version so its whole session can be undone in one restore.
+  async agentSeen(user, activity, writing) {
+    if (!user?.agent) return;
+    const now = Date.now();
+    if (writing) {
+      const key = `agentWrote:${user.name}`;
+      const last = (await this.ctx.storage.get(key)) || 0;
+      if (now - last > AGENT_SESSION_MS && (await this.load()).seq > 0) {
+        await this.snapshot(`Before ${user.name}'s changes`, user.id, true).catch(() => {});
+      }
+      await this.ctx.storage.put(key, now);
+    }
+    const was = this.agents.get(user.name);
+    this.agents.set(user.name, { id: user.id, at: now, activity });
+    if (!was || was.activity !== activity) this.broadcast({ type: 'peers', peers: this.peers() });
   }
 
   async load() {
@@ -113,9 +136,71 @@ export class DocRoom {
       }
       const result = { merged: !!merged, conflicts: merged?.details || [], ...(merged ? { text: out } : {}) };
       if (out === head.text) return Response.json({ seq: head.seq, unchanged: true, ...result });
+      await this.agentSeen(user, 'editing', true);
       const next = await this.store(out, user, docId);
       this.broadcast({ type: 'remote', seq: next.seq, text: out, by: user?.name || null });
       return Response.json({ seq: next.seq, ...result });
+    }
+    if (url.pathname === '/edit' && request.method === 'POST') {
+      // Typed edits (design-edit.js), applied to the current design, so they can't conflict.
+      if (request.headers.get('x-role') !== 'edit') return Response.json({ error: 'You can view this document but not edit it.' }, { status: 403 });
+      const { edits } = await request.json();
+      const head = await this.load();
+      let r;
+      try { r = applyEdits(head.text, edits); } catch (e) { return Response.json({ error: e.message, seq: head.seq }, { status: 400 }); }
+      if (r.text.length > MAX_TEXT) return Response.json({ error: 'Design too large.' }, { status: 413 });
+      if (r.text === head.text) return Response.json({ seq: head.seq, unchanged: true, done: r.done });
+      await this.agentSeen(user, 'editing', true);
+      const next = await this.store(r.text, user, docId);
+      this.broadcast({ type: 'remote', seq: next.seq, text: r.text, by: user?.name || null });
+      return Response.json({ seq: next.seq, done: r.done, before_seq: head.seq });
+    }
+    if (url.pathname === '/changes') {
+      // What changed since a recent seq, readably (design-edit.js diffDesigns).
+      const since = Number(url.searchParams.get('since'));
+      const head = await this.load();
+      if (!Number.isInteger(since) || since < 0 || since > head.seq) return Response.json({ error: `since must be a seq from 0 to ${head.seq}.` }, { status: 400 });
+      if (since === head.seq) return Response.json({ since, seq: head.seq, summary: 'no changes' });
+      const from = await this.ctx.storage.get(`hist:${since}`);
+      if (typeof from !== 'string') return Response.json({ error: `Version ${since} is too old to compare (the last ${HISTORY} changes are kept). Read the document instead.`, seq: head.seq }, { status: 410 });
+      return Response.json({ since, seq: head.seq, by: head.by, ...diffDesigns(from, head.text) });
+    }
+    if (url.pathname === '/run' && request.method === 'POST') {
+      // Agent calls run by a browser tab that has the document open with agents allowed (a host):
+      // SolidCraft's own commands and inspections, and viewport screenshots. The server relays;
+      // the modelling happens in that tab, and any change syncs like the person's own edit.
+      const { calls, at_seq, timeout_ms } = await request.json();
+      const bad = checkCalls(calls);
+      if (bad) return Response.json({ error: bad }, { status: 400 });
+      const writes = calls.some((c) => WRITE_METHODS.has(c.method));
+      if (writes && request.headers.get('x-role') !== 'edit') return Response.json({ error: 'You can view this document but not edit it.' }, { status: 403 });
+      const hosts = this.ctx.getWebSockets().filter((ws) => {
+        const a = ws.deserializeAttachment();
+        return a.host && (!writes || a.role === 'edit');
+      });
+      if (!hosts.length) {
+        return Response.json({
+          error: 'No browser tab is open on this document with agents allowed, so nothing can run the modeller. ' +
+            'Open the document in a browser (its Agents switch is on by default), or run `keel host <id or key>` to open a headless one.',
+          hosts: 0,
+        }, { status: 503 });
+      }
+      const pick = hosts.find((ws) => ws.deserializeAttachment().dedicated) || hosts[0];
+      const rid = crypto.randomUUID();
+      const wait = Math.min(Math.max(Number(timeout_ms) || 60_000, 5_000), 300_000);
+      await this.agentSeen(user, writes ? 'modelling' : 'looking', writes);
+      const answer = new Promise((resolve) => {
+        this.runs.set(rid, resolve);
+        setTimeout(() => resolve({ ok: false, timeout: true, error: `The browser tab didn't answer within ${wait / 1000} s. A hidden or sleeping tab runs slowly: keep it visible, or use \`keel host\`.` }), wait);
+      });
+      pick.send(JSON.stringify({ type: 'run', rid, calls, at_seq: Number.isInteger(at_seq) ? at_seq : null, timeout_ms: wait, by: user?.name || 'An agent' }));
+      const out = await answer;
+      this.runs.delete(rid);
+      return Response.json({ ...out, host: pick.deserializeAttachment().user.name }, { status: out.timeout ? 504 : 200 });
+    }
+    if (url.pathname === '/seen' && request.method === 'POST') {
+      await this.agentSeen(user, (await request.json().catch(() => ({}))).activity || 'reading', false);
+      return Response.json({ ok: true });
     }
     if (url.pathname === '/snapshot' && request.method === 'POST') {
       const { name } = await request.json();
@@ -149,7 +234,7 @@ export class DocRoom {
     const [client, server] = Object.values(pair);
     const conn = crypto.randomUUID().slice(0, 8);
     this.ctx.acceptWebSocket(server);
-    const color = COLORS[[...user.id].reduce((h, c) => (h * 31 + c.charCodeAt(0)) >>> 0, 7) % COLORS.length];
+    const color = colorFor(user.id);
     server.serializeAttachment({ user: { id: user.id, name: user.name }, role, conn, color, activity: null });
     const head = await this.load();
     if (!head.docId && docId) head.docId = docId;
@@ -159,10 +244,16 @@ export class DocRoom {
   }
 
   peers() {
-    return this.ctx.getWebSockets().map((ws) => {
+    const now = Date.now();
+    const people = this.ctx.getWebSockets().map((ws) => {
       const a = ws.deserializeAttachment();
-      return { conn: a.conn, id: a.user.id, name: a.user.name, color: a.color, role: a.role, activity: a.activity };
+      return { conn: a.conn, id: a.user.id, name: a.user.name, color: a.color, role: a.role, activity: a.activity, host: !!a.host };
     });
+    for (const [name, g] of this.agents) {
+      if (now - g.at > AGENT_SHOWN_MS) { this.agents.delete(name); continue; }
+      people.push({ conn: `agent:${name}`, id: g.id, name, color: colorFor(`agent:${name}`), role: 'edit', activity: g.activity, agent: true });
+    }
+    return people;
   }
 
   broadcast(message, except = null) {
@@ -182,6 +273,17 @@ export class DocRoom {
       a.activity = typeof msg.activity === 'string' ? msg.activity.slice(0, 120) : null;
       ws.serializeAttachment(a);
       return this.broadcast({ type: 'peers', peers: this.peers() });
+    }
+    if (msg.type === 'host') {
+      a.host = !!msg.on;
+      a.dedicated = !!msg.dedicated;
+      ws.serializeAttachment(a);
+      return this.broadcast({ type: 'peers', peers: this.peers() });
+    }
+    if (msg.type === 'ran') {
+      const resolve = this.runs.get(msg.rid);
+      if (resolve) { this.runs.delete(msg.rid); const { type, rid, ...rest } = msg; resolve(rest); }
+      return;
     }
     if (msg.type === 'update') {
       if (a.role !== 'edit') return ws.send(JSON.stringify({ type: 'error', id: msg.id, message: 'You can view this document but not edit it.' }));
@@ -204,4 +306,29 @@ export class DocRoom {
   async webSocketError(ws) {
     await this.webSocketClose(ws);
   }
+}
+
+// What agents may ask a host tab to run. Reads change nothing in the design; writes run engine
+// commands (which sync as edits). Commands that touch files, plugins or the app are refused.
+const READ_METHODS = new Set(['document.inspect', 'ui.inspect', 'engine.commands', 'keel.screenshot', 'ui.view', 'ui.camera']);
+const WRITE_METHODS = new Set(['engine.execute', 'engine.batch']);
+const BLOCKED_COMMAND = /^(file|doc|app|plugin|script|window|help|prefs|edit\.preferences)\.|\.(open|save|save_as|export|import|insert_step|insert_mesh)$/;
+
+function checkCalls(calls) {
+  if (!Array.isArray(calls) || !calls.length) return 'Give calls: [{method, params}].';
+  if (calls.length > 50) return 'At most 50 calls at once.';
+  for (const c of calls) {
+    if (!c || typeof c.method !== 'string') return 'Each call needs a method.';
+    if (!READ_METHODS.has(c.method) && !WRITE_METHODS.has(c.method)) return `"${c.method}" isn't available to agents. Methods: ${[...READ_METHODS, ...WRITE_METHODS].join(', ')}.`;
+    const cmds = c.method === 'engine.execute' ? [c.params?.command ?? c.params?.id] : c.method === 'engine.batch' ? (c.params?.commands || []).map((x) => x?.command ?? x?.id) : [];
+    for (const id of cmds) {
+      if (typeof id !== 'string') return `${c.method} needs a command id.`;
+      if (BLOCKED_COMMAND.test(id)) return `The command "${id}" isn't available to agents (files, plugins and app settings stay with the person).`;
+    }
+  }
+  return null;
+}
+
+function colorFor(key) {
+  return COLORS[[...key].reduce((h, c) => (h * 31 + c.charCodeAt(0)) >>> 0, 7) % COLORS.length];
 }

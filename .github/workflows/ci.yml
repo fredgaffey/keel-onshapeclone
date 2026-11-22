@@ -1,0 +1,47 @@
+# Tests on every push and pull request. Deploys stay manual (they need SolidCraft's build staged
+# in public/cad, which isn't in the repository): see README › Deploying.
+name: CI
+on:
+  push:
+  pull_request:
+permissions:
+  contents: read
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  unit:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: { node-version: 22, cache: npm }
+      - run: npm ci
+      - run: npm test
+      - name: public/keel.mjs is built from cli/keel.mjs
+        run: node scripts/build-cli.mjs && git diff --exit-code public/keel.mjs
+      - name: Worker modules parse
+        run: for f in worker/*.js public/js/*.js; do node --check "$f"; done
+
+  agents:
+    # The Worker in local mode (D1, R2, Durable Objects simulated), driven over HTTP: accounts,
+    # tokens, merging, loose documents, the purge, OAuth, both MCP servers and the keel CLI.
+    # The browser-host step needs SolidCraft, so it's skipped here (HOST=0).
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: { node-version: 22, cache: npm }
+      - run: npm ci
+      - run: npx wrangler d1 migrations apply keel --local
+      - name: Start the Worker
+        run: |
+          npx wrangler dev --port 8787 --ip 127.0.0.1 --local-upstream 127.0.0.1:8787 --test-scheduled > dev.log 2>&1 &
+          curl -s --retry 60 --retry-connrefused --retry-delay 1 -o /dev/null http://127.0.0.1:8787/api/config
+      - name: Agent tests
+        run: PATH="$PWD/node_modules/.bin:$PATH" HOST=0 node tests/agents.mjs
+      - if: failure()
+        run: tail -100 dev.log

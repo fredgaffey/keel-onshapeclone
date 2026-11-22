@@ -19,6 +19,8 @@
 //
 // Account:  keel login --url https://<site> [--token keel_...] | logout | whoami | ls
 // Other:    keel cat <id|key> | version <id|key> <name> | open <id|key>
+//           keel host <id|key|file.sc>   open it in headless Chrome for agents: kernel checks,
+//                                        screenshots and modelling commands (CHROME= to choose)
 // Agents:   keel mcp    (an MCP server on stdio; Claude Code: claude mcp add keel -- node /path/to/keel.mjs mcp)
 //
 // The token comes from KEEL_TOKEN or ~/.config/keel/config.json (`keel login`, readable only by
@@ -28,6 +30,8 @@ import { readFileSync, writeFileSync, mkdirSync, existsSync, renameSync } from '
 import { homedir } from 'node:os';
 import { join, dirname, basename, resolve } from 'node:path';
 import { createInterface } from 'node:readline';
+import { spawn } from 'node:child_process';
+import { tmpdir } from 'node:os';
 // ---- inlined from public/js/merge.js
 const { mergeDesigns } = (() => {
 // Three-way merge of SolidCraft design files (the JSON `document.export` gives).
@@ -255,6 +259,7 @@ const { TOOLS, DESIGN_NOTE, runTool, handleRpc } = (() => {
 //   site: 'https://keel.example.com',
 //   signedIn: whether the caller has an account token (without one, only loose documents work),
 //   reads?: Map, remembering what was read so a write can send its base text too,
+//   asset(path) -> parsed JSON of a file the site serves (the format catalog),
 // }
 
 const DESIGN_NOTE =
@@ -294,6 +299,7 @@ const TOOLS = [
         design: { type: 'string', description: 'The whole design JSON, as text.' },
         base_seq: { type: 'integer', description: 'The seq the design was read at.' },
         on_conflict: { type: 'string', enum: ['mine', 'theirs', 'ask'] },
+        check: { type: 'boolean', description: 'After saving, rebuild it with the real kernel and report errors (see inspect_model).' },
       },
       required: ['id', 'design', 'base_seq'],
     },
@@ -309,6 +315,63 @@ const TOOLS = [
       type: 'object',
       properties: { name: { type: 'string' }, design: { type: 'string' }, loose: { type: 'boolean' }, by: { type: 'string', description: 'For loose documents: the name shown to people who open it, e.g. "Claude".' } },
       required: ['name'],
+    },
+  },
+  {
+    name: 'edit_document',
+    description:
+      'Make small typed changes without sending the whole design. Applied to the current design, so they never conflict. Edits run in order; features are named by id or exact name. Ops: ' +
+      'set_parameter {name, expr ("25 mm", "width / 2"), unit?}, delete_parameter {name}, rename {feature, name}, suppress {feature, suppressed?}, delete {feature}, ' +
+      'set {feature, path ("depth" or "extent.distance"), value}, add {feature: {type, name?, ...fields}, after?} (id and a unique name are filled in), move {feature, after}, rename_design {name}. ' +
+      'check: true then rebuilds it in a browser tab with the real kernel and reports errors (needs a tab open on the document; see inspect_model).',
+    inputSchema: {
+      type: 'object',
+      properties: { id: ID, edits: { type: 'array', items: { type: 'object' } }, check: { type: 'boolean' } },
+      required: ['id', 'edits'],
+    },
+  },
+  {
+    name: 'get_changes',
+    description: 'What changed in a document since a seq (one of the last 50 changes): features added, removed and renamed, each changed field with before and after, and parameters. Much smaller than reading the whole design.',
+    inputSchema: { type: 'object', properties: { id: ID, since_seq: { type: 'integer' } }, required: ['id', 'since_seq'] },
+    annotations: { readOnlyHint: true },
+  },
+  {
+    name: 'inspect_model',
+    description:
+      'Rebuild check by the real modelling kernel: each feature with its error or warning, the bodies, parameters, and optionally volumes and areas (measure: true). ' +
+      'Runs in a browser tab that has the document open with agents allowed (on by default), or one started with `keel host`. Pass at_seq (from a write) to inspect that version.',
+    inputSchema: { type: 'object', properties: { id: ID, measure: { type: 'boolean' }, at_seq: { type: 'integer' } }, required: ['id'] },
+    annotations: { readOnlyHint: true },
+  },
+  {
+    name: 'screenshot',
+    description: 'A picture of the model as rendered by the modeller, from a browser tab on the document (see inspect_model). view: iso, front, back, top, bottom, left, right, home or fit.',
+    inputSchema: { type: 'object', properties: { id: ID, view: { type: 'string', enum: ['iso', 'front', 'back', 'top', 'bottom', 'left', 'right', 'home', 'fit'] }, at_seq: { type: 'integer' } }, required: ['id'] },
+    annotations: { readOnlyHint: true },
+  },
+  {
+    name: 'list_commands',
+    description: 'Search SolidCraft\'s modelling commands (about 620: sketch.*, solid.*, sheet metal, patterns...), with their parameters, for run_commands. Give a filter such as "extrude", "fillet" or "sketch.rect".',
+    inputSchema: { type: 'object', properties: { filter: { type: 'string' } }, required: ['filter'] },
+    annotations: { readOnlyHint: true },
+  },
+  {
+    name: 'describe_format',
+    description: 'The design format reference: with no topic, an overview and the list of worked examples; with a topic ("extrude", "sketch", "fillet", "revolve", "pattern"...), the matching examples (the commands that make them, tested, and the features they produce in the design JSON) and commands. Read this before writing features by hand.',
+    inputSchema: { type: 'object', properties: { topic: { type: 'string' } } },
+    annotations: { readOnlyHint: true },
+  },
+  {
+    name: 'run_commands',
+    description:
+      'Model with SolidCraft\'s own commands, run by the real kernel in a browser tab on the document; the result syncs to everyone like a person\'s edit. ' +
+      'commands: [{command, params}] (see list_commands), run as one batch: if one fails, the batch is undone (rollback) and the failure is returned. ' +
+      'Name what you make: most create commands take a name or body_name ("Mounting plate", not "Extrude1"). screenshot: a view name to get a picture afterwards.',
+    inputSchema: {
+      type: 'object',
+      properties: { id: ID, commands: { type: 'array', items: { type: 'object' } }, screenshot: { type: 'string' } },
+      required: ['id', 'commands'],
     },
   },
   {
@@ -385,8 +448,9 @@ async function runTool(ctx, name, a = {}) {
         };
       }
       ctx.reads?.set(t.id, { seq: r.seq, text: r.text ?? a.design });
+      const check = a.check ? await inspect(ctx, t, { at_seq: r.seq }).catch((e) => ({ unavailable: e.message })) : undefined;
       return {
-        saved: !r.unchanged, seq: r.seq, merged: r.merged, conflicts: r.conflicts,
+        saved: !r.unchanged, seq: r.seq, merged: r.merged, conflicts: r.conflicts, ...(check ? { check } : {}),
         ...(r.merged ? { note: 'Others changed the design meanwhile; their changes were merged in. read_document shows the result.' } : {}),
         url: openUrl(ctx, t.id, t.key),
       };
@@ -403,6 +467,57 @@ async function runTool(ctx, name, a = {}) {
       const { document: d } = await ctx.call('/docs', { method: 'POST', body: { name: a.name, ...(a.design ? { text: a.design } : {}) } });
       return { id: d.id, name: d.name, url: openUrl(ctx, d.id) };
     }
+    case 'edit_document': {
+      const t = await target(ctx, a.id);
+      const r = await ctx.call(`/docs/${t.id}/edit`, { method: 'POST', body: { edits: a.edits }, key: t.key });
+      const out = { saved: !r.unchanged, seq: r.seq, done: r.done };
+      if (a.check && !r.unchanged) out.check = await inspect(ctx, t, { at_seq: r.seq }).catch((e) => ({ unavailable: e.message }));
+      return out;
+    }
+    case 'get_changes': {
+      const t = await target(ctx, a.id);
+      return ctx.call(`/docs/${t.id}/changes?since=${encodeURIComponent(a.since_seq)}`, { key: t.key });
+    }
+    case 'inspect_model': {
+      const t = await target(ctx, a.id);
+      return inspect(ctx, t, a);
+    }
+    case 'screenshot': {
+      const t = await target(ctx, a.id);
+      const r = await run(ctx, t, [{ method: 'keel.screenshot', params: { view: a.view } }], a.at_seq);
+      const shot = r.results[0];
+      return { __content: [{ type: 'image', data: shot.image, mimeType: shot.mime }, { type: 'text', text: `${shot.width}×${shot.height}, document seq ${r.seq}, from ${r.host}'s tab.` }] };
+    }
+    case 'list_commands': {
+      const cat = await catalog(ctx);
+      const f = String(a.filter || '').toLowerCase();
+      const hits = cat.commands.filter((c) => `${c.id} ${c.label}`.toLowerCase().includes(f));
+      return { matches: hits.length, commands: hits.slice(0, 40), ...(hits.length > 40 ? { note: 'Showing 40; narrow the filter.' } : {}) };
+    }
+    case 'describe_format': {
+      const cat = await catalog(ctx);
+      const topic = String(a.topic || '').toLowerCase().trim();
+      if (!topic) {
+        const families = {};
+        for (const c of cat.commands) { const fam = c.id.split('.')[0]; families[fam] = (families[fam] || 0) + 1; }
+        return { format: cat.format, note: DESIGN_NOTE, examples: Object.keys(cat.examples), command_families: families, next: 'describe_format with a topic shows examples; list_commands searches commands.' };
+      }
+      const examples = Object.entries(cat.examples).filter(([k, v]) => k.includes(topic) || JSON.stringify(v.commands).toLowerCase().includes(topic) || v.features.some((f) => String(f.type).toLowerCase().includes(topic)));
+      const commands = cat.commands.filter((c) => c.id.toLowerCase().includes(topic)).slice(0, 15);
+      return { format: cat.format, examples: Object.fromEntries(examples), commands, ...(examples.length || commands.length ? {} : { note: `Nothing about "${topic}". Examples: ${Object.keys(cat.examples).join(', ')}.` }) };
+    }
+    case 'run_commands': {
+      const t = await target(ctx, a.id);
+      if (!Array.isArray(a.commands) || !a.commands.length) throw new Error('Give commands: [{command, params}].');
+      const calls = [{ method: 'engine.batch', params: { commands: a.commands.map((c) => ({ command: c.command ?? c.id, params: c.params ?? {} })), rollback: true } }];
+      if (a.screenshot) calls.push({ method: 'keel.screenshot', params: { view: a.screenshot } });
+      const r = await run(ctx, t, calls, null, { allowFail: true });
+      const batch = r.results[0];
+      const text = { ok: r.ok && !batch?.failed, seq: r.seq, saved: r.saved, completed: batch?.completed, failed: batch?.failed || r.failed || undefined, results: batch?.results };
+      const shot = r.results[1];
+      if (shot?.image) return { __content: [{ type: 'text', text: JSON.stringify(text, null, 2) }, { type: 'image', data: shot.image, mimeType: shot.mime }] };
+      return text;
+    }
     case 'save_version': {
       const t = await target(ctx, a.id);
       return ctx.call(`/docs/${t.id}/versions`, { method: 'POST', body: { name: a.name }, key: t.key });
@@ -414,6 +529,36 @@ async function runTool(ctx, name, a = {}) {
     default:
       throw new Error(`Unknown tool ${name}`);
   }
+}
+
+// The format reference (public/agents/catalog.json, built by scripts/feature-catalog.mjs).
+let catalogCache = null;
+async function catalog(ctx) {
+  if (!catalogCache) catalogCache = ctx.asset('/agents/catalog.json').catch((e) => { catalogCache = null; throw e; });
+  return catalogCache;
+}
+
+// Calls run by a browser tab on the document (DocRoom /run).
+async function run(ctx, t, calls, at_seq = null, { allowFail = false } = {}) {
+  const r = await ctx.call(`/docs/${t.id}/run`, { method: 'POST', body: { calls, at_seq, timeout_ms: 90_000 }, key: t.key });
+  if (!r.ok && !allowFail) throw new Error(r.error || (r.failed ? `${r.failed.method} failed: ${r.failed.error}` : 'The browser tab could not run that.'));
+  return r;
+}
+
+async function inspect(ctx, t, { measure = false, at_seq = null } = {}) {
+  const r = await run(ctx, t, [{ method: 'document.inspect', params: { timeline: 'summary', bodies: measure ? true : 'names', measure: !!measure } }], at_seq);
+  const d = r.results[0] || {};
+  const timeline = d.timeline || [];
+  const problems = timeline.filter((f) => f.error || f.warning).map((f) => ({ id: f.id, name: f.name, type: f.type, ...(f.error ? { error: f.error } : {}), ...(f.warning ? { warning: f.warning } : {}) }));
+  return {
+    seq: r.seq,
+    rebuilds: !problems.some((p) => p.error),
+    problems,
+    features: timeline.map((f) => `${f.id} ${f.name} (${f.type})${f.suppressed ? ' suppressed' : ''}${f.rolled_back ? ' rolled back' : ''}`),
+    bodies: d.bodies,
+    params: d.params,
+    units: d.units,
+  };
 }
 
 // One MCP JSON-RPC message in, one reply out (null for notifications).
@@ -430,6 +575,7 @@ async function handleRpc(msg, { ctx, tools = TOOLS, run = (n, a) => runTool(ctx,
     if (method === 'tools/call') {
       try {
         const out = await run(params.name, params.arguments || {});
+        if (out && out.__content) return ok({ content: out.__content });
         return ok({ content: [{ type: 'text', text: typeof out === 'string' ? out : JSON.stringify(out, null, 2) }] });
       } catch (e) {
         return ok({ content: [{ type: 'text', text: e.message }], isError: true });
@@ -607,6 +753,45 @@ async function create(name, { from, loose = false, by } = {}) {
   return { id, name, key, url: docUrl(cfg.url, id, key), file, expires_at: expires, note };
 }
 
+// ---------------------------------------------------------------- agent host
+// A headless Chrome with the document open in host mode (/d/<id>?host=1), so agents' kernel
+// checks, screenshots and modelling commands have a tab to run in. It runs until stopped.
+
+function findChrome() {
+  const candidates = [
+    process.env.CHROME,
+    '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome',
+    '/Applications/Chromium.app/Contents/MacOS/Chromium',
+    '/Applications/Microsoft Edge.app/Contents/MacOS/Microsoft Edge',
+    '/usr/bin/google-chrome', '/usr/bin/google-chrome-stable', '/usr/bin/chromium', '/usr/bin/chromium-browser', '/snap/bin/chromium',
+    'C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe',
+  ].filter(Boolean);
+  const hit = candidates.find((p) => existsSync(p));
+  if (!hit) throw new KeelError('No Chrome found. Install Chrome or Chromium, or set CHROME to its path.');
+  return hit;
+}
+
+async function host(ref, { detached = false } = {}) {
+  let site = loadConfig().url, id, key;
+  if (ref && ref.endsWith('.sc') && existsSync(sidecar(resolve(ref)))) {
+    const link = readLink(resolve(ref));
+    ({ id } = link); key = link.key; site = link.url;
+  } else {
+    if (!ref) throw new KeelError('Which document? Give its id, key or linked file.');
+    ({ id, key } = await target(ref, site));
+  }
+  const credential = key || loadConfig().token;
+  if (!credential) throw new KeelError('Hosting an account document needs a token: run `keel login` or set KEEL_TOKEN.');
+  const url = `${site}/d/${id}?host=1#key=${credential}`;
+  const profile = join(tmpdir(), `keel-host-${id}`);
+  mkdirSync(profile, { recursive: true });
+  const chrome = findChrome();
+  const child = spawn(chrome, ['--headless=new', '--enable-unsafe-webgpu', '--enable-features=Vulkan', '--disable-background-timer-throttling', '--disable-renderer-backgrounding',
+    '--no-first-run', '--no-default-browser-check', `--user-data-dir=${profile}`, '--window-size=1400,900', url], { detached, stdio: 'ignore' });
+  if (detached) child.unref();
+  return { id, pid: child.pid, chrome, child, url: `${site}/d/${id}` };
+}
+
 // ---------------------------------------------------------------- command line
 
 const HELP = (() => {
@@ -746,6 +931,13 @@ async function cli(argv) {
       console.log('This checks the file\'s structure only. Opening it in SolidCraft (or `solidcraft-cli`) rebuilds it with the real kernel.');
       return;
     }
+    case 'host': {
+      need(1, 'host <id|key|file.sc>');
+      const h = await host(args[0]);
+      console.log(`Hosting ${h.url} for agents in headless Chrome (pid ${h.pid}). The first start downloads the modeller (~32 MB). Ctrl-C stops it.`);
+      await new Promise((res) => { h.child.on('exit', res); process.on('SIGINT', () => { h.child.kill(); res(); }); });
+      return;
+    }
     case 'mcp': return serveMcp();
     case undefined: case 'help': case '--help': case '-h': console.log(HELP); return;
     case '--version': console.log(VERSION); return;
@@ -778,6 +970,11 @@ const LOCAL_TOOLS = [
     inputSchema: { type: 'object', properties: { path: { type: 'string' }, name: { type: 'string' }, loose: { type: 'boolean' }, by: { type: 'string' } }, required: ['path'] },
   },
   {
+    name: 'start_host',
+    description: 'Open a document in headless Chrome on this computer as an agent tab, so inspect_model, screenshot, list_commands and run_commands work without anyone having it open. It keeps running in the background; the first start takes up to a minute (the modeller downloads and starts).',
+    inputSchema: { type: 'object', properties: { id: { type: 'string', description: 'Document id, key, or a linked .sc file.' } }, required: ['id'] },
+  },
+  {
     name: 'merge_files',
     description: 'Three-way merge of local design files, no server needed: base (the common ancestor), mine and theirs. Writes the result to out (or returns it) and lists each conflict with its base, mine and theirs values; prefer picks the winner of a field both changed.',
     inputSchema: { type: 'object', properties: { base: { type: 'string' }, mine: { type: 'string' }, theirs: { type: 'string' }, out: { type: 'string' }, prefer: { type: 'string', enum: ['mine', 'theirs'] } }, required: ['base', 'mine', 'theirs'] },
@@ -791,6 +988,11 @@ function serveMcp() {
     signedIn: !!cfg.token,
     reads: new Map(),
     call: (path, opts = {}) => call(path, opts),
+    async asset(path) {
+      const res = await fetch(cfg.url + path).catch((e) => { throw new KeelError(`Can't reach ${cfg.url}: ${e.message}`); });
+      if (!res.ok) throw new KeelError(`${path}: HTTP ${res.status}`);
+      return res.json();
+    },
   };
   const run = async (name, a) => {
     switch (name) {
@@ -798,6 +1000,10 @@ function serveMcp() {
       case 'push_document': return push(a.path, { onConflict: a.on_conflict || 'mine' });
       case 'file_status': return status(a.path);
       case 'upload_file': return create(a.name || basename(a.path).replace(/\.sc$/, ''), { from: a.path, loose: !!a.loose, by: a.by });
+      case 'start_host': {
+        const h = await host(a.id, { detached: true });
+        return { hosting: h.url, pid: h.pid, note: 'Give it up to a minute to load, then use inspect_model, screenshot or run_commands. Stop it by killing the pid.' };
+      }
       case 'merge_files': {
         const [b, m, t] = [a.base, a.mine, a.theirs].map((p) => readFileSync(p, 'utf8'));
         const r = mergeDesigns(b, m, t, { prefer: a.prefer === 'theirs' ? 'theirs' : 'mine' });

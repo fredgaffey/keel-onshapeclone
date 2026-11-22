@@ -21,7 +21,7 @@ async function hashPassword(password, saltHex) {
   return hex(bits);
 }
 
-async function sha256(text) {
+export async function sha256(text) {
   return hex(await crypto.subtle.digest('SHA-256', enc.encode(text)));
 }
 

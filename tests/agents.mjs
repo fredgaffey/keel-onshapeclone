@@ -45,8 +45,8 @@ function cli(args, { env = {}, cwd, ok = true } = {}) {
   }
 }
 
-async function rpc(body, token) {
-  const res = await fetch(`${BASE}/mcp`, { method: 'POST', headers: { 'content-type': 'application/json', accept: 'application/json, text/event-stream', ...(token ? { authorization: `Bearer ${token}` } : {}) }, body: JSON.stringify(body) });
+async function rpc(body, token, path = token ? '/mcp' : '/mcp/loose') {
+  const res = await fetch(`${BASE}${path}`, { method: 'POST', headers: { 'content-type': 'application/json', accept: 'application/json, text/event-stream', ...(token ? { authorization: `Bearer ${token}` } : {}) }, body: JSON.stringify(body) });
   return { status: res.status, data: res.status === 202 ? null : await res.json() };
 }
 async function mcpTool(name, args, token) {
@@ -147,6 +147,69 @@ await step('remote MCP: signed in, and without an account', async () => {
   assert.equal(v.name, 'Checkpoint');
   const bad = await rpc({ jsonrpc: '2.0', id: 3, method: 'tools/list' }, 'keel_wrong');
   assert.equal(bad.status, 401);
+  const res = await fetch(`${BASE}/mcp`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: '{"jsonrpc":"2.0","id":1,"method":"tools/list"}' });
+  assert.equal(res.status, 401, '/mcp without a token asks for sign-in');
+  assert.match(res.headers.get('www-authenticate'), /resource_metadata="[^"]+\/\.well-known\/oauth-protected-resource\/mcp"/);
+});
+
+await step('typed edits and changes, without a browser', async () => {
+  const c = (await http(`/api/docs/${docId}/content`, { token })).data;
+  const r = (await mcpTool('edit_document', { id: docId, edits: [
+    { op: 'rename', feature: 'Rib', name: 'Rib (left)' },
+    { op: 'set', feature: 1, path: 'depth', value: 12 },
+    { op: 'set_parameter', name: 'wall', expr: '3 mm' },
+    { op: 'add', feature: { type: 'box', width: 5, height: 5, depth: 5 } },
+  ] }, token)).value;
+  assert.equal(r.saved, true);
+  assert.equal(r.done.length, 4);
+  const d = JSON.parse((await http(`/api/docs/${docId}/content`, { token })).data.text);
+  const added = d.features[d.features.length - 1];
+  assert.equal(added.name, 'Box', 'a new feature gets a name from its type');
+  assert.equal(d.next_id, added.id + 1);
+  const ch = (await mcpTool('get_changes', { id: docId, since_seq: c.seq }, token)).value;
+  assert.match(ch.summary, /added "Box"/);
+  assert.match(ch.summary, /wall/);
+  const bad = await mcpTool('edit_document', { id: docId, edits: [{ op: 'rename', feature: 'Nope', name: 'x' }] }, token);
+  assert.ok(bad.isError && /No feature "Nope"/.test(bad.text));
+  const noHost = await mcpTool('inspect_model', { id: docId }, token);
+  assert.ok(noHost.isError && /No browser tab/.test(noHost.text), 'a clear answer when no tab can run the modeller');
+});
+
+await step('OAuth: register, consent, PKCE, token, refresh, revoke', async () => {
+  const meta = await (await fetch(`${BASE}/.well-known/oauth-authorization-server`)).json();
+  assert.equal(meta.code_challenge_methods_supported[0], 'S256');
+  const reg = await (await fetch(meta.registration_endpoint, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ client_name: 'Test connector', redirect_uris: ['http://localhost:9999/cb'] }) })).json();
+  const verifier = 'v'.repeat(30) + run.padEnd(20, 'x');
+  const challenge = Buffer.from(await crypto.subtle.digest('SHA-256', new TextEncoder().encode(verifier))).toString('base64url');
+  const q = new URLSearchParams({ response_type: 'code', client_id: reg.client_id, redirect_uri: 'http://localhost:9999/cb', code_challenge: challenge, code_challenge_method: 'S256', state: 'st8' });
+  const anon = await fetch(`${meta.authorization_endpoint}?${q}`, { redirect: 'manual' });
+  assert.equal(anon.status, 302);
+  assert.match(anon.headers.get('location'), /\/\?next=%2Foauth%2Fauthorize/, 'not signed in: off to sign in first');
+  const consent = await (await fetch(`${meta.authorization_endpoint}?${q}`, { headers: { cookie } })).text();
+  assert.match(consent, /Connect Test connector\?/);
+  const form = new URLSearchParams([...q, ['decision', 'allow']]);
+  form.delete('response_type');
+  const cross = await fetch(meta.authorization_endpoint, { method: 'POST', redirect: 'manual', headers: { cookie, origin: 'https://evil.example', 'content-type': 'application/x-www-form-urlencoded' }, body: form });
+  assert.equal(cross.status, 403, 'consent can\'t be posted from another site');
+  const ok = await fetch(meta.authorization_endpoint, { method: 'POST', redirect: 'manual', headers: { cookie, origin: BASE, 'content-type': 'application/x-www-form-urlencoded' }, body: form });
+  const back = new URL(ok.headers.get('location'));
+  assert.equal(back.searchParams.get('state'), 'st8');
+  const code = back.searchParams.get('code');
+  const tok = (body) => fetch(meta.token_endpoint, { method: 'POST', headers: { 'content-type': 'application/x-www-form-urlencoded' }, body: new URLSearchParams(body) });
+  assert.equal((await tok({ grant_type: 'authorization_code', code, client_id: reg.client_id, redirect_uri: 'http://localhost:9999/cb', code_verifier: 'w'.repeat(50) })).status, 400, 'wrong verifier');
+  const code2 = new URL((await fetch(meta.authorization_endpoint, { method: 'POST', redirect: 'manual', headers: { cookie, origin: BASE, 'content-type': 'application/x-www-form-urlencoded' }, body: form })).headers.get('location')).searchParams.get('code');
+  const t = await (await tok({ grant_type: 'authorization_code', code: code2, client_id: reg.client_id, redirect_uri: 'http://localhost:9999/cb', code_verifier: verifier })).json();
+  assert.match(t.access_token, /^keel_/);
+  assert.equal((await tok({ grant_type: 'authorization_code', code: code2, client_id: reg.client_id, redirect_uri: 'http://localhost:9999/cb', code_verifier: verifier })).status, 400, 'a code works once');
+  const listed = await mcpTool('list_documents', {}, t.access_token);
+  assert.ok(listed.value.some((d) => d.id === docId), 'the OAuth token works on /mcp');
+  const t2 = await (await tok({ grant_type: 'refresh_token', refresh_token: t.refresh_token, client_id: reg.client_id })).json();
+  assert.match(t2.access_token, /^keel_/);
+  await http('/api/me', { token: t.access_token, expect: 401 });
+  const mine = (await http('/api/tokens', { cookie })).data.tokens.find((x) => x.name === 'Test connector (connected app)');
+  assert.ok(mine, 'the connection shows among API tokens');
+  await http(`/api/tokens/${mine.id}`, { method: 'DELETE', cookie });
+  assert.equal((await tok({ grant_type: 'refresh_token', refresh_token: t2.refresh_token, client_id: reg.client_id })).status, 400, 'revoked on the website: refresh fails');
 });
 
 await step('keel CLI: link, push, pull with merge, conflicts, local merge', async () => {
@@ -232,6 +295,64 @@ await step('keel mcp (stdio): local tools and shared ones', async () => {
   assert.ok((await callTool('list_documents', {})).some((x) => x.id === docId));
   child.kill();
 });
+
+await step('format reference without a browser', async () => {
+  const overview = (await mcpTool('describe_format', {}, token)).value;
+  assert.match(overview.format, /^solidcraft\//);
+  assert.ok(overview.examples.includes('sketch and extrude'));
+  const ex = (await mcpTool('describe_format', { topic: 'extrude' }, token)).value;
+  assert.ok(ex.examples['sketch and extrude'].features.some((f) => f.type === 'extrude'));
+  const cmds = (await mcpTool('list_commands', { filter: 'solid.fillet' })).value;
+  assert.equal(cmds.commands[0].id, 'solid.fillet');
+  assert.ok(!(await mcpTool('list_commands', { filter: 'file.' })).value.commands.some((c) => c.id.startsWith('file.')), 'file commands are not offered');
+});
+
+const CHROME = process.env.CHROME || '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome';
+if (process.env.HOST !== '0' && existsSync(CHROME)) {
+  await step('a host tab: kernel commands, inspection, checks, screenshots, presence', async () => {
+    const { chromium } = await import('@playwright/test');
+    const made = (await mcpTool('create_document', { name: 'Hosted', by: 'Claude' })).value;
+    const browser = await chromium.launch({ executablePath: CHROME, args: ['--enable-unsafe-webgpu'] });
+    try {
+      const page = await (await browser.newContext({ viewport: { width: 1200, height: 800 } })).newPage();
+      await page.goto(`${BASE}/d/${made.id}?host=1#key=${made.key}`);
+      await page.waitForSelector('.banner', { timeout: 180_000 });
+      const ran = await mcpTool('run_commands', { id: made.key, commands: [{ command: 'solid.box', params: { length: 40, width: 30, height: 8, name: 'Base plate', body_name: 'Plate' } }], screenshot: 'iso' });
+      const res = JSON.parse(ran.text);
+      assert.equal(res.ok, true);
+      assert.equal(res.saved, true);
+      const { data } = await rpc({ jsonrpc: '2.0', id: 9, method: 'tools/call', params: { name: 'run_commands', arguments: { id: made.key, commands: [{ command: 'solid.cylinder', params: { radius: 3, height: 8, center: [20, 15, 0], operation: 'cut', name: 'Hole' } }], screenshot: 'top' } } });
+      assert.equal(data.result.content[1].type, 'image');
+      assert.ok(data.result.content[1].data.length > 5000);
+      const fail = JSON.parse((await mcpTool('run_commands', { id: made.key, commands: [{ command: 'solid.fillet', params: { radius: 2 } }] })).text);
+      assert.equal(fail.ok, false);
+      assert.match(fail.failed.error, /edges/);
+      const blocked = await mcpTool('run_commands', { id: made.key, commands: [{ command: 'file.export', params: { path: '/x.stl' } }] });
+      assert.ok(blocked.isError);
+      const ins = (await mcpTool('inspect_model', { id: made.key, measure: true })).value;
+      assert.equal(ins.rebuilds, true);
+      assert.ok(ins.bodies[0].volume_mm3 < 40 * 30 * 8 - 20, `the hole was cut: volume ${ins.bodies[0].volume_mm3}`);
+      // A typed edit, rebuilt and checked by the kernel in the host tab.
+      const e = (await mcpTool('edit_document', { id: made.key, edits: [{ op: 'set', feature: 'Base plate', path: 'height', value: 12 }], check: true })).value;
+      assert.equal(e.check?.rebuilds, true, JSON.stringify(e).slice(0, 600));
+      const ins2 = (await mcpTool('inspect_model', { id: made.key, measure: true, at_seq: e.seq })).value;
+      assert.ok(ins2.bodies[0].volume_mm3 > ins.bodies[0].volume_mm3, 'the edit reached the kernel');
+      // A change the modeller refuses: reported at once, and fixing it recovers.
+      const t0 = Date.now();
+      const broken = (await mcpTool('edit_document', { id: made.key, edits: [{ op: 'set', feature: 'Base plate', path: 'height', value: [1, 2] }], check: true })).value;
+      assert.equal(broken.check.opens, false, JSON.stringify(broken).slice(0, 400));
+      assert.ok(Date.now() - t0 < 15_000, 'no long wait');
+      const fixed = (await mcpTool('edit_document', { id: made.key, edits: [{ op: 'set', feature: 'Base plate', path: 'height', value: '12' }], check: true })).value;
+      assert.equal(fixed.check.rebuilds, true, JSON.stringify(fixed).slice(0, 400));
+      const peers = await page.evaluate(() => [...document.querySelectorAll('#peers .avatar')].map((a) => a.title).join(' | '));
+      assert.match(peers, /\(agent\)/, `an agent shows among the people here: ${peers}`);
+      const versions = (await mcpTool('list_versions', { id: made.key })).value.versions;
+      assert.ok(versions.some((v) => /^Before /.test(v.name)), 'a restore point before the agent\'s session');
+    } finally {
+      await browser.close();
+    }
+  });
+}
 
 if (process.env.PURGE !== '0' && /127\.0\.0\.1|localhost/.test(BASE)) {
   await step('expired loose documents are purged', async () => {

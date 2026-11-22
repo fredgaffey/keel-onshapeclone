@@ -26,6 +26,11 @@ const docKey = (() => {
   } catch { return fromHash || null; }
 })();
 if (docKey) useKey(docKey);
+// Agent host: this tab runs SolidCraft commands, inspections and screenshots for agents (relayed by
+// the document's room). On by default in a tab that can edit; ?host=1 marks a tab opened only for
+// agents (`keel host`), which agents prefer.
+const dedicatedHost = new URLSearchParams(location.search).get('host') === '1';
+const hostAllowed = () => { try { return dedicatedHost || localStorage.getItem('keel-agent-host') !== 'off'; } catch { return true; } };
 const $ = (id) => document.getElementById(id);
 
 const S = {
@@ -48,6 +53,8 @@ const S = {
   retry: 0,
   version: 0,
 };
+window.keelSync = S; // for tests and debugging
+
 
 let chain = Promise.resolve();
 /** Run engine work one piece at a time: imports and exports must never interleave. */
@@ -212,6 +219,19 @@ async function readEngine() {
 
 /** The server's design is now `theirs` (at `seq`): bring SolidCraft and our copy up to it. */
 async function reconcile(theirs, seq, by) {
+  try {
+    await reconcileInner(theirs, seq, by);
+    if (S.importError && S.seq >= S.importError.seq) S.importError = null;
+  } catch (e) {
+    // The newer design doesn't open here (a hand-written or agent-made design the modeller
+    // refuses). Keep what we have, say so, and let an agent waiting on this version know.
+    S.importError = { seq, by, message: e.message };
+    banner(`${by || 'Someone'}'s latest change (version ${seq}) couldn't be opened: ${e.message}. You're still on version ${S.seq}; Versions can restore an earlier one.`);
+    throw e;
+  }
+}
+
+async function reconcileInner(theirs, seq, by) {
   await readEngine();
   const before = S.known;
   const mine = S.known;
@@ -310,7 +330,9 @@ async function onMessage(msg) {
         await reconcile(msg.text, msg.seq, null);
       }
       hideLoading();
-      if (S.role === 'view') banner('View only: you can look around and measure, but changes aren\'t saved.');
+      send({ type: 'host', on: hostAllowed(), dedicated: dedicatedHost });
+      if (dedicatedHost) banner('This tab is working for agents: they inspect, screenshot and model here. Keep it open (and visible) while they work.');
+      else if (S.role === 'view') banner('View only: you can look around and measure, but changes aren\'t saved.');
       else if (S.expires) banner(`Loose document, with no account: it will be deleted on ${new Date(S.expires).toLocaleString(undefined, { dateStyle: 'full', timeStyle: 'short' })}. Anyone with this page's address can edit it. Download it to keep a copy.`);
       break;
     }
@@ -339,6 +361,9 @@ async function onMessage(msg) {
     case 'peers':
       S.peers = msg.peers;
       renderPeers();
+      break;
+    case 'run':
+      runForAgent(msg); // not awaited: it may wait for remote changes queued behind this message
       break;
   }
   status();
@@ -400,8 +425,87 @@ function status() {
 }
 
 function renderPeers() {
-  const others = S.peers.filter((p, i, all) => all.findIndex((q) => q.id === p.id) === i);
-  $('peers').innerHTML = others.map((p) => `<span class="avatar" style="background:${esc(p.color)}" title="${esc(p.name)}${p.id === S.me?.id ? ' (you)' : ''}${p.role === 'view' ? ' · viewing' : ''}${p.activity ? ` · ${esc(p.activity)}` : ''}">${esc(initials(p.name))}</span>`).join('');
+  const who = (p) => (p.agent ? p.conn : p.id); // an agent shares its person's id but shows apart
+  const others = S.peers.filter((p, i, all) => all.findIndex((q) => who(q) === who(p)) === i);
+  $('peers').innerHTML = others.map((p) => `<span class="avatar" style="background:${esc(p.color)}" title="${esc(p.name)}${p.agent ? ' (agent)' : p.id === S.me?.id ? ' (you)' : ''}${p.role === 'view' ? ' · viewing' : ''}${p.activity ? ` · ${esc(p.activity)}` : ''}">${esc(initials(p.name))}</span>`).join('');
+}
+
+// ---------------- agent host ----------------
+
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
+/** Run an agent's calls here (see DocRoom /run), then report back, once any change is saved. */
+async function runForAgent(msg) {
+  const deadline = Date.now() + Math.max(5_000, (msg.timeout_ms || 60_000) - 3_000);
+  const reply = (r) => send({ type: 'ran', rid: msg.rid, ...r });
+  if (!hostAllowed()) return reply({ ok: false, error: 'Agents are turned off in that tab.' });
+  // Catch up first: an agent that just wrote wants its check to see that write.
+  const refused = () => S.importError && S.importError.seq >= msg.at_seq;
+  while (msg.at_seq && (S.seq < msg.at_seq || S.pendingRemote) && !refused() && Date.now() < deadline) {
+    if (S.pendingRemote && !S.inflight) await serial(async () => { if (S.pendingRemote) { const m = S.pendingRemote; S.pendingRemote = null; await reconcile(m.text, m.seq, m.by); } });
+    await sleep(100);
+  }
+  if (msg.at_seq && refused()) return reply({ ok: false, opens: false, seq: S.importError.seq, error: `Version ${S.importError.seq} doesn't open in the modeller: ${S.importError.message}` });
+  if (msg.at_seq && S.seq < msg.at_seq) return reply({ ok: false, error: `This tab hasn't received version ${msg.at_seq} yet (it has ${S.seq}).` });
+  flashAgent(msg.by);
+  const out = await serial(async () => {
+    const results = [];
+    for (const [i, c] of msg.calls.entries()) {
+      try {
+        results.push(c.method === 'keel.screenshot' ? await screenshot(c.params || {}) : await S.cad.request(c.method, c.params ?? {}));
+      } catch (e) {
+        return { ok: false, results, failed: { index: i, method: c.method, error: e.message } };
+      }
+    }
+    await readEngine();
+    return { ok: true, results };
+  });
+  // A change: wait until the room has it, so the agent's next read sees it.
+  while ((S.known !== S.base || S.inflight) && S.connected && Date.now() < deadline) await sleep(100);
+  reply({ ...(out || { ok: false, error: 'The tab could not run that.' }), seq: S.seq, saved: S.known === S.base });
+}
+
+/** The viewport as a JPEG, at most `max` pixels wide (agents pay for pixels). */
+async function screenshot({ view, max = 1024, quality = 0.82 } = {}) {
+  if (view) await S.cad.request('ui.view', { view });
+  const w = $('cad').contentWindow;
+  const canvas = w.document.querySelector('canvas');
+  if (!canvas) throw new Error('no viewport yet');
+  await new Promise((r) => w.requestAnimationFrame(() => w.requestAnimationFrame(r)));
+  const stream = canvas.captureStream(30);
+  const video = document.createElement('video');
+  try {
+    video.muted = true;
+    video.srcObject = stream;
+    await video.play();
+    await Promise.race([new Promise((r) => (video.requestVideoFrameCallback ? video.requestVideoFrameCallback(r) : setTimeout(r, 300))), sleep(3000)]);
+    const scale = Math.min(1, max / video.videoWidth);
+    const c = document.createElement('canvas');
+    c.width = Math.round(video.videoWidth * scale);
+    c.height = Math.round(video.videoHeight * scale);
+    c.getContext('2d').drawImage(video, 0, 0, c.width, c.height);
+    const data = c.toDataURL('image/jpeg', quality);
+    return { image: data.slice(data.indexOf(',') + 1), mime: 'image/jpeg', width: c.width, height: c.height };
+  } finally {
+    stream.getTracks().forEach((t) => t.stop());
+    video.srcObject = null;
+  }
+}
+
+let flashTimer = null;
+function flashAgent(by) {
+  const el = $('agentnote');
+  if (!el || dedicatedHost) return;
+  el.textContent = `${by || 'An agent'} is working in this tab`;
+  el.hidden = false;
+  clearTimeout(flashTimer);
+  flashTimer = setTimeout(() => (el.hidden = true), 4000);
+}
+
+/** The top bar's switch: may agents use this tab? */
+export function setAgentHost(on) {
+  try { localStorage.setItem('keel-agent-host', on ? 'on' : 'off'); } catch {}
+  send({ type: 'host', on, dedicated: dedicatedHost });
 }
 
 function banner(text) {
@@ -439,6 +543,15 @@ function wireBar() {
   nameInput.addEventListener('keydown', (e) => { if (e.key === 'Enter') nameInput.blur(); if (e.key === 'Escape') { nameInput.value = S.name; nameInput.blur(); } });
   nameInput.addEventListener('blur', commit);
   $('share-btn').onclick = shareDrawer;
+  const agentsBtn = $('agents-btn');
+  const showAgents = () => { agentsBtn.textContent = hostAllowed() ? 'Agents: on' : 'Agents: off'; };
+  showAgents();
+  agentsBtn.onclick = () => {
+    const on = !hostAllowed();
+    setAgentHost(on);
+    showAgents();
+    toast(on ? 'Agents can now inspect, screenshot and model in this tab. Set them up from your name → API tokens and agents on the home page.' : 'Agents can no longer use this tab. They can still read and edit the document itself.', 'info', 6000);
+  };
   $('versions-btn').onclick = versionsDrawer;
   // Flexblade: a panel talking to a local `flexblade gui` server (pull STEP, push parameters).
   // Loaded on first click; its engine work goes through `serial` like ours.
