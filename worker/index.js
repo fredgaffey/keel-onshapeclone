@@ -24,6 +24,7 @@ async function handle(request, env) {
       if (url.pathname === '/mcp' || url.pathname === '/mcp/loose') return await mcp(request, env, url, (req) => handle(req, env), { loose: url.pathname === '/mcp/loose' });
       if (isOAuthPath(url.pathname)) return await oauth(request, env, url);
       if (url.pathname.startsWith('/cad/') && url.pathname.endsWith('_bg.wasm')) return await wasm(env, url);
+      if (/^\/cad\/delta\/[0-9a-f]{64}-[0-9a-f]{64}$/.test(url.pathname)) return await delta(env, url);
       if (/^\/d\/[A-Za-z0-9]+\/?$/.test(url.pathname)) return env.ASSETS.fetch(new Request(new URL('/doc', url), request));
       return env.ASSETS.fetch(request);
     } catch (e) {
@@ -72,6 +73,17 @@ async function wasm(env, url) {
       'cache-control': 'public, max-age=31536000, immutable',
       etag: obj.httpEtag,
     },
+    encodeBody: 'manual',
+  });
+}
+
+// A patch from one SolidCraft WebAssembly build to another (scripts/cad-deltas.mjs makes them at
+// deploy time), so SolidCraft's service worker downloads what changed, not the whole module.
+async function delta(env, url) {
+  const obj = await env.FILES.get(`cad/delta/${url.pathname.split('/').pop()}`);
+  if (!obj) return new Response('No patch between those builds', { status: 404 });
+  return new Response(obj.body, {
+    headers: { 'content-type': 'application/octet-stream', 'content-encoding': 'br', 'cache-control': 'public, max-age=31536000, immutable', etag: obj.httpEtag },
     encodeBody: 'manual',
   });
 }

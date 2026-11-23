@@ -1,0 +1,124 @@
+From a0eb889c652fa8440b5ace2ce6f1301b4a235e45 Mon Sep 17 00:00:00 2001
+From: Keel <noreply@anthropic.com>
+Date: Mon, 23 Nov 2026 11:22:32 +1100
+Subject: [PATCH] Service worker: take an update's WebAssembly as a patch when
+ the site offers one
+
+Each build's module is ~32 MB compressed (174 MB raw), and any change made browsers download all
+of it. When a kept build has an earlier module, the worker asks for delta/<old sha256>-<new
+sha256>; a host that publishes patches answers with a small KDL1 patch (a few MB between builds),
+applied as it streams and checked against the build's SHA-256 like any download. A 404, a bad
+patch or a wrong result falls back to downloading the whole file, so hosts without patches see
+no change. (HTTP compression dictionaries can't do this: Chrome caps them at 100 MiB.)
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ apps/solidcraft-web/sw.js | 85 +++++++++++++++++++++++++++++++++++++++
+ 1 file changed, 85 insertions(+)
+
+diff --git a/apps/solidcraft-web/sw.js b/apps/solidcraft-web/sw.js
+index c0c1ab43..55886c2c 100644
+--- a/apps/solidcraft-web/sw.js
++++ b/apps/solidcraft-web/sw.js
+@@ -61,6 +61,85 @@ const drop = (name, unwanted) =>
+ 
+ const hex = (buffer) => Array.from(new Uint8Array(buffer), (b) => b.toString(16).padStart(2, "0")).join("");
+ 
++/**
++ * An update's WebAssembly as a patch against the module an earlier kept build has, when the site
++ * offers one at `delta/<old sha256>-<new sha256>` (a host that publishes patches makes updates a
++ * fraction of the download; one that doesn't answers 404 and nothing changes). The result is
++ * checked against the build's SHA-256 like any download; null means "download the whole file".
++ * Patch format "KDL1": u32 new length, then ops: 1 copy (u32 offset, u32 length), 2 insert
++ * (u32 length, bytes), 3 copy adding bytes mod 256 (u32 offset, u32 length, bytes).
++ */
++async function viaDelta(into, file, sha256, signal) {
++  if (!file.endsWith("_bg.wasm")) return null;
++  const names = (await caches.keys()).filter((n) => n.startsWith(CACHE_PREFIX) && n !== into).reverse();
++  for (const name of names) {
++    const cache = await caches.open(name);
++    const kept = (await cache.keys()).find((r) => r.url.endsWith("_bg.wasm"));
++    if (!kept) continue;
++    const old = new Uint8Array(await (await cache.match(kept)).arrayBuffer());
++    const from = hex(await crypto.subtle.digest("SHA-256", old));
++    if (from === sha256) return old;
++    const response = await fetch(url(`delta/${from}-${sha256}`), { signal }).catch(() => null);
++    if (!response || !response.ok || !response.body) continue;
++    const out = await applyDelta(old, response.body);
++    if (out && hex(await crypto.subtle.digest("SHA-256", out)) === sha256) return out;
++  }
++  return null;
++}
++
++/** Apply a KDL1 patch as it streams in (the patch itself is never held whole). */
++async function applyDelta(old, stream) {
++  const reader = stream.getReader();
++  let buf = new Uint8Array(0);
++  const more = async () => {
++    const { done, value } = await reader.read();
++    if (done) return false;
++    const next = new Uint8Array(buf.length + value.length);
++    next.set(buf);
++    next.set(value, buf.length);
++    buf = next;
++    return true;
++  };
++  const need = async (n) => {
++    while (buf.length < n) if (!(await more())) return false;
++    return true;
++  };
++  const u32 = (at) => buf[at] | (buf[at + 1] << 8) | (buf[at + 2] << 16) | (buf[at + 3] * 16777216);
++  if (!(await need(8)) || String.fromCharCode(buf[0], buf[1], buf[2], buf[3]) !== "KDL1") return null;
++  const out = new Uint8Array(u32(4));
++  buf = buf.subarray(8);
++  let w = 0;
++  for (;;) {
++    if (!buf.length && !(await more())) break;
++    const op = buf[0];
++    if (op === 1) {
++      if (!(await need(9))) return null;
++      const off = u32(1), len = u32(5);
++      if (off + len > old.length || w + len > out.length) return null;
++      out.set(old.subarray(off, off + len), w);
++      w += len;
++      buf = buf.subarray(9);
++    } else if (op === 2 || op === 3) {
++      const head = op === 2 ? 5 : 9;
++      if (!(await need(head))) return null;
++      const off = op === 3 ? u32(1) : 0, len = u32(head - 4);
++      if (w + len > out.length || (op === 3 && off + len > old.length)) return null;
++      buf = buf.subarray(head);
++      // The bytes may span many chunks: take them as they come.
++      for (let k = 0; k < len; ) {
++        if (!buf.length && !(await more())) return null;
++        const n = Math.min(len - k, buf.length);
++        if (op === 2) out.set(buf.subarray(0, n), w + k);
++        else for (let j = 0; j < n; j++) out[w + k + j] = (old[off + k + j] + buf[j]) & 255;
++        k += n;
++        buf = buf.subarray(n);
++      }
++      w += len;
++    } else return null;
++  }
++  return w === out.length ? out : null;
++}
++
+ /**
+  * Keep every file of a build (an earlier partial download is resumed); resolves to its cache's
+  * name. The first file that fails cancels the others.
+@@ -76,6 +155,12 @@ function keep(version, files) {
+       files.map(async ({ file, sha256 }) => {
+         try {
+           if (await cache.match(url(file))) return;
++          // A large file can come as a patch against the copy an earlier kept build has.
++          const patched = await viaDelta(name, file, sha256, cancel.signal).catch(() => null);
++          if (patched) {
++            await cache.put(url(file), new Response(patched, { headers: { "Content-Type": file.endsWith(".wasm") ? "application/wasm" : "application/octet-stream" } }));
++            return;
++          }
+           // `no-cache`: revalidate with the server, so a stale HTTP-cached page never mixes builds.
+           const response = await fetch(new Request(url(file), { cache: "no-cache" }), { signal: cancel.signal });
+           if (!response.ok) throw new Error(`${file}: HTTP ${response.status}`);
+-- 
+2.55.0
+

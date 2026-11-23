@@ -213,12 +213,27 @@ look, name and icons are under [LICENSE-BRAND](https://github.com/tangency-labs/
 Running your own build for yourself is fine. A public service showing SolidCraft's look needs
 Tangency Labs' permission, or Keel's own UI kit, theme and icons.
 
+## Updates are deltas
+
+SolidCraft's module is 174 MB (32 MB compressed), and every SolidCraft build changes it. HTTP
+compression dictionaries can't help: Chrome caps them at 100 MiB.
+- **At deploy time,** `scripts/stage-cad.sh` makes a patch from each of the last three builds' modules
+  to the new one (`scripts/cad-deltas.mjs`, format in `scripts/cad-delta.mjs`). It uploads them to R2
+  at `cad/delta/<old sha256>-<new sha256>`.
+- **In the browser,** SolidCraft's service worker (patch 0003) asks for the patch for the module it
+  has. It applies the patch as it streams in and checks the result's SHA-256.
+- **Size:** a patch between consecutive builds is about 3.4 MB, and one from a week-old build about
+  4.1 MB.
+- **Fallback:** anything missing or wrong means downloading the whole module, as before.
+
 ## Limits worth knowing
 
-- **Keel carries its own fixes to SolidCraft** in `patches/solidcraft/`. Currently there are two:
+- **Keel carries its own fixes to SolidCraft** in `patches/solidcraft/`. Currently there are three:
   - Holding the up or down arrow no longer flips the view at the pole.
   - The Appearance dialog shows colour and opacity live while you change them. OK keeps the
     change as one undo step; Cancel puts the model back.
+  - SolidCraft's service worker downloads an update to the WebAssembly as a patch from the build
+    the browser already has, about 3 to 4 MB instead of 32 MB.
   - `BUILD=1 scripts/stage-cad.sh` applies each patch before building, so updating the SolidCraft
     checkout can't silently drop one.
   - If a patch stops applying because upstream fixed the bug, the build says so. Delete that patch.

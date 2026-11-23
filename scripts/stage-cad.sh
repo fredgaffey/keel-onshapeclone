@@ -42,3 +42,6 @@ fi
 
 cd "$root"
 wrangler r2 object put "keel-files/cad/$wasm" --file "build/$wasm.br" --content-type application/wasm "$mode"
+# Patches from the last few builds to this one, so browsers that have an earlier build download a
+# few MB instead of the whole module (SolidCraft's service worker asks for /cad/delta/<old>-<new>).
+node --max-old-space-size=6144 scripts/cad-deltas.mjs "public/cad/$wasm" "$mode"
