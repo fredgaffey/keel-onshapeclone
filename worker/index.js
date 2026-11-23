@@ -23,7 +23,7 @@ async function handle(request, env) {
       if (url.pathname.startsWith('/api/')) return await api(request, env, url);
       if (url.pathname === '/mcp' || url.pathname === '/mcp/loose') return await mcp(request, env, url, (req) => handle(req, env), { loose: url.pathname === '/mcp/loose' });
       if (isOAuthPath(url.pathname)) return await oauth(request, env, url);
-      if (url.pathname.startsWith('/cad/') && url.pathname.endsWith('_bg.wasm')) return await wasm(env, url);
+      if (url.pathname.startsWith('/cad/') && url.pathname.endsWith('_bg.wasm')) return await wasm(env, url, request);
       if (/^\/cad\/delta\/[0-9a-f]{64}-[0-9a-f]{64}$/.test(url.pathname)) return await delta(env, url);
       if (/^\/d\/[A-Za-z0-9]+\/?$/.test(url.pathname)) return env.ASSETS.fetch(new Request(new URL('/doc', url), request));
       return env.ASSETS.fetch(request);
@@ -63,8 +63,18 @@ async function purgeLoose(env) {
 
 // SolidCraft's WebAssembly is ~166 MB, over the 25 MiB limit for static assets, so a Brotli copy
 // lives in R2 and goes out as-is; the browser decompresses it.
-async function wasm(env, url) {
-  const obj = await env.FILES.get(`cad/${url.pathname.split('/').pop()}`);
+async function wasm(env, url, request) {
+  const key = `cad/${url.pathname.split('/').pop()}`;
+  // SolidCraft's service worker revalidates (`no-cache`) right after the page downloaded the
+  // module: answer 304 so the browser reuses those bytes instead of fetching 32 MB again.
+  const tag = request.headers.get('if-none-match');
+  if (tag) {
+    const head = await env.FILES.head(key);
+    if (head && (tag === head.httpEtag || tag === `W/${head.httpEtag}`)) {
+      return new Response(null, { status: 304, headers: { etag: head.httpEtag, 'cache-control': 'public, max-age=31536000, immutable' } });
+    }
+  }
+  const obj = await env.FILES.get(key);
   if (!obj) return new Response('Not found', { status: 404 });
   return new Response(obj.body, {
     headers: {
