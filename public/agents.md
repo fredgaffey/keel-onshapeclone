@@ -93,6 +93,8 @@ claude mcp add --transport http keel-loose https://keel.pebnum.com/mcp/loose
 | `run_commands` ⚙ | ✓ | ✓ | SolidCraft commands, run as one batch that rolls back on failure |
 | `start_host` | | ✓ | Opens a headless browser tab for the ⚙ tools |
 | `merge_files` | | ✓ | Three-way merge of local files: base, mine and theirs |
+| `import_file` ⚙ | ✓ | ✓ | STEP, IGES, STL, 3MF, OBJ, glTF, point clouds, DXF, KiCad into a document (base64; `units` for STL/OBJ) |
+| `import_local_file` | | ✓ | The same, from a file on this computer (`keel import <id> <file>`) |
 | `save_version`, `list_versions`, `restore_version` | ✓ | ✓ | Named versions; restore puts one back (keeping the current state as a version first) |
 | `pull_document` | | ✓ | Document to a linked local `.sc` file; merges local changes onto newer ones |
 | `push_document` | | ✓ | Linked file back to the document, merged |

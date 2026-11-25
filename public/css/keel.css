@@ -180,3 +180,6 @@ table.docs td { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; 
 table.docs th:last-child, table.docs td:last-child { width: 48px; }
 table.docs th:nth-child(3), table.docs td:nth-child(3) { width: 150px; }
 @media (max-width: 720px) { table.docs th:nth-child(3), table.docs td:nth-child(3) { width: 96px; } }
+
+/* ---- importing ---- */
+body.dropping .main { outline: 3px dashed var(--accent); outline-offset: -10px; }

@@ -18,6 +18,8 @@
 //
 // Account:  keel login --url https://<site> [--token keel_...] | logout | whoami | ls
 // Other:    keel cat <id|key> | version <id|key> <name> | open <id|key>
+//           keel import <id|key> <file> [--units mm]   STEP, IGES, STL, 3MF, OBJ, glTF, DXF... into
+//                                        a document (needs a host tab: keel host, or a browser)
 //           keel host <id|key|file.sc>   open it in headless Chrome for agents: kernel checks,
 //                                        screenshots and modelling commands (CHROME= to choose)
 // Agents:   keel mcp    (an MCP server on stdio; Claude Code: claude mcp add keel -- node /path/to/keel.mjs mcp)
@@ -375,6 +377,13 @@ async function cli(argv) {
       console.log('This checks the file\'s structure only. Opening it in SolidCraft (or `solidcraft-cli`) rebuilds it with the real kernel.');
       return;
     }
+    case 'import': {
+      need(2, 'import <id|key> <file> [--units mm|cm|m|in|ft]');
+      const data = readFileSync(args[1]).toString('base64');
+      const r = await runTool({ site: cfg.url, signedIn: !!cfg.token, call: (path, o = {}) => call(path, o) }, 'import_file', { id: args[0], name: basename(args[1]), data, units: typeof f.units === 'string' ? f.units : undefined });
+      console.log(`Sent ${basename(args[1])} (${r.parts} part${r.parts > 1 ? 's' : ''}); the host tab is converting it. \`keel cat\` or a screenshot in a moment shows the result.`);
+      return;
+    }
     case 'host': {
       need(1, 'host <id|key|file.sc>');
       const h = await host(args[0]);
@@ -419,6 +428,11 @@ const LOCAL_TOOLS = [
     inputSchema: { type: 'object', properties: { id: { type: 'string', description: 'Document id, key, or a linked .sc file.' } }, required: ['id'] },
   },
   {
+    name: 'import_local_file',
+    description: 'Import a STEP, IGES, STL, 3MF, OBJ, glTF, point cloud, DXF or KiCad file from this computer into a Keel document (converted by the modeller in a host tab; start one with start_host if none is open). units for STL and OBJ.',
+    inputSchema: { type: 'object', properties: { id: { type: 'string' }, path: { type: 'string' }, units: { type: 'string', enum: ['mm', 'cm', 'm', 'in', 'ft'] } }, required: ['id', 'path'] },
+  },
+  {
     name: 'merge_files',
     description: 'Three-way merge of local design files, no server needed: base (the common ancestor), mine and theirs. Writes the result to out (or returns it) and lists each conflict with its base, mine and theirs values; prefer picks the winner of a field both changed.',
     inputSchema: { type: 'object', properties: { base: { type: 'string' }, mine: { type: 'string' }, theirs: { type: 'string' }, out: { type: 'string' }, prefer: { type: 'string', enum: ['mine', 'theirs'] } }, required: ['base', 'mine', 'theirs'] },
@@ -444,6 +458,8 @@ function serveMcp() {
       case 'push_document': return push(a.path, { onConflict: a.on_conflict || 'mine' });
       case 'file_status': return status(a.path);
       case 'upload_file': return create(a.name || basename(a.path).replace(/\.sc$/, ''), { from: a.path, loose: !!a.loose, by: a.by });
+      case 'import_local_file':
+        return runTool(ctx, 'import_file', { id: a.id, name: basename(a.path), data: readFileSync(a.path).toString('base64'), units: a.units });
       case 'start_host': {
         const h = await host(a.id, { detached: true });
         return { hosting: h.url, pid: h.pid, note: 'Give it up to a minute to load, then use inspect_model, screenshot or run_commands. Stop it by killing the pid.' };

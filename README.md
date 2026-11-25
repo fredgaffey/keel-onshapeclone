@@ -20,6 +20,12 @@ running as WebAssembly on your own device. Keel adds what a cloud CAD service ne
 - **Backup to a folder:** in Chrome and Edge, Keel also writes each document to a folder you
   choose on your computer whenever it's saved.
 - **Installable** as an app, which also works offline.
+- **Importing files:**
+  - Keel imports STEP, IGES, STL, 3MF, OBJ, glTF, point clouds (PLY, XYZ, PTS), DXF and KiCad
+    boards. Use **Import a file…** or drop the file on your documents page.
+  - The conversion happens in your browser, by SolidCraft.
+  - Fusion 360, SolidWorks, Inventor, CATIA, Creo and NX files are in closed formats. Keel explains
+    how to export STEP from each one.
 - **AI agents:**
   - Claude Code, Codex or a script works on your documents with an API token, seen live by
     everyone with the document open.
@@ -178,6 +184,7 @@ Deploys stay manual, since they need SolidCraft's build staged in `public/cad`.
 npm test                        # unit tests for the merge
 npm run e2e                     # with `npm run dev` running: three browsers, see below
 npm run test:agents             # with `npm run dev` running: tokens, merging, loose documents, OAuth, MCP, the CLI, a host tab
+node tests/import.mjs            # with `npm run dev` running and SolidCraft staged: STEP/STL import, closed formats, agent import
 npm run catalog                 # with `npm run dev` running: rebuild public/agents/catalog.json from SolidCraft
 ```
 
@@ -228,8 +235,10 @@ compression dictionaries can't help: Chrome caps them at 100 MiB.
 
 ## Limits worth knowing
 
-- **Keel carries its own fixes to SolidCraft** in `patches/solidcraft/`. Currently there are three:
+- **Keel carries its own fixes to SolidCraft** in `patches/solidcraft/`. Currently there are four:
   - Holding the up or down arrow no longer flips the view at the pole.
+  - `document.import_file`, so a page that embeds SolidCraft can import STEP, mesh and other files.
+    Embed mode has no file drops and no file picker.
   - The Appearance dialog shows colour and opacity live while you change them. OK keeps the
     change as one undo step; Cancel puts the model back.
   - SolidCraft's service worker downloads an update to the WebAssembly as a patch from the build

@@ -334,7 +334,7 @@ export class DocRoom {
 // What agents may ask a host tab to run. Reads change nothing in the design; writes run engine
 // commands (which sync as edits). Commands that touch files, plugins or the app are refused.
 const READ_METHODS = new Set(['document.inspect', 'ui.inspect', 'engine.commands', 'keel.screenshot', 'ui.view', 'ui.camera']);
-const WRITE_METHODS = new Set(['engine.execute', 'engine.batch']);
+const WRITE_METHODS = new Set(['engine.execute', 'engine.batch', 'document.import_file']);
 const BLOCKED_COMMAND = /^(file|doc|app|plugin|script|window|help|prefs|edit\.preferences)\.|\.(open|save|save_as|export|import|insert_step|insert_mesh)$/;
 
 function checkCalls(calls) {

@@ -140,6 +140,14 @@ export const TOOLS = [
     },
   },
   {
+    name: 'import_file',
+    description:
+      'Bring a STEP, IGES, STL, 3MF, OBJ, glTF, PLY/XYZ/PTS point cloud, DXF or KiCad file into a document: the modeller in a host tab converts it (see inspect_model) and the result saves like an edit. ' +
+      'data: the file in base64; units (mm, cm, m, in, ft) for STL and OBJ, which state none. The import runs in the background: inspect_model or screenshot shortly after to see it. ' +
+      'Fusion 360, SolidWorks, Inventor, CATIA, Creo and NX files can\'t be read outside their own software: export STEP from them first.',
+    inputSchema: { type: 'object', properties: { id: ID, name: { type: 'string', description: 'The file name, with its extension, e.g. bracket.step' }, data: { type: 'string' }, units: { type: 'string', enum: ['mm', 'cm', 'm', 'in', 'ft'] } }, required: ['id', 'name', 'data'] },
+  },
+  {
     name: 'save_version',
     description: 'Save a named version of a document, which can be restored from the Versions panel. Good before and after a large change.',
     inputSchema: { type: 'object', properties: { id: ID, name: { type: 'string' } }, required: ['id', 'name'] },
@@ -300,6 +308,23 @@ export async function runTool(ctx, name, a = {}) {
       const shot = r.results[1];
       if (shot?.image) return { __content: [{ type: 'text', text: JSON.stringify(text, null, 2) }, { type: 'image', data: shot.image, mimeType: shot.mime }] };
       return text;
+    }
+    case 'import_file': {
+      const t = await target(ctx, a.id);
+      const ext = String(a.name || '').toLowerCase().split('.').pop();
+      if (['f3d', 'f3z', 'sldprt', 'sldasm', 'ipt', 'iam', 'catpart', 'catproduct', 'prt', 'x_t', 'x_b', 'skp'].includes(ext)) {
+        throw new Error(`${a.name} is in a closed format only its own software reads: export STEP from it and import that.`);
+      }
+      const data = String(a.data || '').replace(/\s+/g, '');
+      if (!data) throw new Error('Give data: the file in base64.');
+      const PART = 600_000; // base64 characters a part: each goes to the host tab over its socket
+      const parts = Math.ceil(data.length / PART);
+      let r;
+      for (let i = 0; i < parts; i++) {
+        const params = { name: a.name, data: data.slice(i * PART, (i + 1) * PART), part: i, last: i === parts - 1, ...(a.units ? { units: a.units } : {}) };
+        r = await run(ctx, t, [{ method: 'document.import_file', params }]);
+      }
+      return { started: true, file: a.name, bytes: r.results[0]?.bytes, parts, note: 'Converting in the host tab; inspect_model or screenshot in a few seconds to see the result.' };
     }
     case 'save_version': {
       const t = await target(ctx, a.id);

@@ -1,0 +1,208 @@
+From 4944d75e2135e8e7ef7228d60c952f72890e85bb Mon Sep 17 00:00:00 2001
+From: Keel <noreply@anthropic.com>
+Date: Wed, 25 Nov 2026 13:51:24 +1100
+Subject: [PATCH] Control: document.import_file, for pages that embed the app
+
+An embedding page gets no file drops and no file picker, so it had no way to bring in a STEP,
+mesh, point cloud, DXF or KiCad file. document.import_file takes the file's name and bytes
+(base64, in parts for large files) and imports it into the open design as a drop does, in the
+background; units (mm, in, ...) answers the unit question STL and OBJ files otherwise ask.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ crates/ui-egui/src/control.rs   |   1 +
+ crates/ui-egui/src/documents.rs | 146 ++++++++++++++++++++++++++++++++
+ docs/control-protocol.md        |   1 +
+ 3 files changed, 148 insertions(+)
+
+diff --git a/crates/ui-egui/src/control.rs b/crates/ui-egui/src/control.rs
+index ea87e910..e875b5b5 100644
+--- a/crates/ui-egui/src/control.rs
++++ b/crates/ui-egui/src/control.rs
+@@ -658,6 +658,7 @@ fn dispatch(app: &mut SolveApp, ctx: &egui::Context, method: &str, p: &Value) ->
+         // A host that keeps the files itself (an editing embed, #8517).
+         "document.export" => wrap(crate::documents::export(app)),
+         "document.import" => wrap(crate::documents::import(app, p)),
++        "document.import_file" => wrap(crate::documents::import_file(app, p)),
+         "document.saved" => wrap(crate::documents::saved(app, p)),
+         // The connection already counts as subscribed (`DocumentWatch::join`), and its events start
+         // from this answer: published first, so no event repeats it and none older follows.
+diff --git a/crates/ui-egui/src/documents.rs b/crates/ui-egui/src/documents.rs
+index aee6f387..b4e20b31 100644
+--- a/crates/ui-egui/src/documents.rs
++++ b/crates/ui-egui/src/documents.rs
+@@ -753,6 +753,125 @@ pub fn import(app: &mut SolveApp, p: &Value) -> Result<Value, String> {
+     Ok(json!({"name": app.session.doc.name, "features": app.session.doc.features.len(), "errors": errors, "revision": revision}))
+ }
+ 
++thread_local! {
++    /// A file arriving in parts through `document.import_file`: its name and the bytes so far.
++    static INCOMING_FILE: std::cell::RefCell<Option<(String, Vec<u8>)>> = const { std::cell::RefCell::new(None) };
++}
++
++/// The largest file `document.import_file` takes (in all its parts).
++pub const IMPORT_FILE_MAX: usize = 512 * 1024 * 1024;
++
++/// `document.import_file`: a file the host page has (an embedding page gets no drops and no file
++/// picker) imported into the open design as a dropped file is: CAD bodies (STEP, IGES, …),
++/// meshes (STL, 3MF, OBJ, glTF), point clouds, DXF drawings, or a KiCad board. `data` is the file
++/// in base64; a file bigger than one request allows comes in parts (`part` 0, 1, …, `last` on the
++/// final one). The import runs in the background like a drop (`ui.inspect`'s `file_busy`).
++pub fn import_file(app: &mut SolveApp, p: &Value) -> Result<Value, String> {
++    if app.file_picker_busy() || app.file_load.busy() || app.docs.closing.is_some() || app.docs.quitting.is_some() || app.docs.batch.is_some() {
++        return Err("a file is being opened or saved, or designs are being closed: try again".into());
++    }
++    let name = p
++        .get("name")
++        .and_then(Value::as_str)
++        .map(str::trim)
++        .filter(|n| !n.is_empty() && n.len() <= 200 && !n.contains(['/', '\\']) && !n.starts_with('.'))
++        .ok_or("`name`: the file's name, such as `bracket.step` (no folders)")?;
++    let data = p.get("data").and_then(Value::as_str).ok_or("missing `data`: the file, in base64")?;
++    let bytes = decode_base64(data).ok_or("`data` isn't base64")?;
++    let part = p.get("part").and_then(Value::as_u64).unwrap_or(0);
++    let last = p.get("last").and_then(Value::as_bool).unwrap_or(true);
++    let lower = name.to_ascii_lowercase();
++    let io = |f: fn(&str) -> bool| f(&lower);
++    if io(solidcraft_engine::io::is_design_path) {
++        return Err(format!("{name} is a design: give its text to `document.import` instead"));
++    }
++    let kicad = io(solidcraft_engine::io::is_kicad_path);
++    let importable = kicad
++        || io(solidcraft_engine::io::is_step_path)
++        || io(solidcraft_engine::io::is_mesh_path)
++        || io(solidcraft_engine::io::is_point_cloud_path)
++        || solidcraft_engine::cmd::drawing_import_command(&lower).is_some();
++    if !importable {
++        return Err(format!("{name}: not a kind of file this can import (STEP, IGES, STL, 3MF, OBJ, glTF, PLY, XYZ, PTS, DXF or a KiCad board)"));
++    }
++    let whole = INCOMING_FILE.with(|cell| -> Result<Option<Vec<u8>>, String> {
++        let mut cell = cell.borrow_mut();
++        if part == 0 {
++            *cell = Some((name.to_string(), Vec::new()));
++        }
++        let (pending, size) = match cell.as_ref() {
++            Some((pending, so_far)) => (pending.clone(), so_far.len()),
++            None => return Err(format!("part {part} of {name} came without part 0")),
++        };
++        if pending != name {
++            *cell = None;
++            return Err(format!("part {part} is of {name}, but {pending} was arriving: start again from part 0"));
++        }
++        if size + bytes.len() > IMPORT_FILE_MAX {
++            *cell = None;
++            return Err(format!("{name} is over {} MB", IMPORT_FILE_MAX / (1024 * 1024)));
++        }
++        if let Some((_, so_far)) = cell.as_mut() {
++            so_far.extend_from_slice(&bytes);
++        }
++        Ok(if last { cell.take().map(|(_, b)| b) } else { None })
++    })?;
++    let Some(whole) = whole else {
++        return Ok(json!({"name": name, "part": part, "last": false}));
++    };
++    // In the browser, the engine's in-memory files (uploads are never written anywhere); natively,
++    // a temporary folder.
++    let path = if cfg!(target_arch = "wasm32") {
++        format!("/upload/{name}")
++    } else {
++        let dir = std::env::temp_dir().join(format!("solidcraft-import-{}", std::process::id()));
++        std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
++        dir.join(name).to_string_lossy().to_string()
++    };
++    solidcraft_engine::io::vfs::write(&path, &whole).map_err(|e| e.to_string())?;
++    let bytes = whole.len();
++    // `units` for a file that states none (STL, OBJ): given, nothing asks; else the person is
++    // asked, as for a drop.
++    let units = p.get("units").and_then(Value::as_str);
++    if kicad {
++        app.drop_path(&path);
++    } else if let Some(units) = units {
++        let mut request = crate::file_load::Request::new(&path, crate::file_load::Kind::Insert);
++        request.options.insert("units".into(), json!(units));
++        crate::file_load::step_folder_option(app, &path, &mut request.options);
++        crate::file_load::begin_request(app, request)?;
++    } else {
++        app.insert_path_async(&path);
++    }
++    Ok(json!({"name": name, "bytes": bytes, "path": path, "started": true}))
++}
++
++fn decode_base64(s: &str) -> Option<Vec<u8>> {
++    let value = |c: u8| match c {
++        b'A'..=b'Z' => Some(c - b'A'),
++        b'a'..=b'z' => Some(c - b'a' + 26),
++        b'0'..=b'9' => Some(c - b'0' + 52),
++        b'+' | b'-' => Some(62),
++        b'/' | b'_' => Some(63),
++        _ => None,
++    };
++    let s: Vec<u8> = s.bytes().filter(|c| !c.is_ascii_whitespace()).collect();
++    let s = s.strip_suffix(b"==").or_else(|| s.strip_suffix(b"=")).unwrap_or(&s);
++    let mut out = Vec::with_capacity(s.len() / 4 * 3 + 3);
++    for chunk in s.chunks(4) {
++        if chunk.len() == 1 {
++            return None;
++        }
++        let mut n = 0u32;
++        for (k, c) in chunk.iter().enumerate() {
++            n |= u32::from(value(*c)?) << (18 - 6 * k);
++        }
++        let b = [(n >> 16) as u8, (n >> 8) as u8, n as u8];
++        out.extend_from_slice(&b[..chunk.len() - 1]);
++    }
++    Some(out)
++}
++
+ /// The host saved the design at `revision` (`document.saved`): it counts as saved from there.
+ /// Refused when the design has changed since.
+ pub fn saved(app: &mut SolveApp, p: &Value) -> Result<Value, String> {
+@@ -1805,6 +1924,33 @@ fn renaming_tab(app: &SolveApp) -> bool {
+ 
+ #[cfg(test)]
+ mod tests {
++    #[test]
++    fn import_file_inserts_a_mesh_in_parts_and_refuses_what_it_cannot() {
++        let mut h = crate::scenario::Harness::new();
++        let stl = "solid t\nfacet normal 0 0 1\nouter loop\nvertex 0 0 0\nvertex 10 0 0\nvertex 0 10 0\nendloop\nendfacet\nfacet normal 0 0 1\nouter loop\nvertex 10 0 0\nvertex 10 10 0\nvertex 0 10 0\nendloop\nendfacet\nendsolid t\n";
++        let b64 = crate::agent_chat::backend::base64(stl.as_bytes());
++        let (a, rest) = b64.split_at(8);
++        assert_eq!(super::import_file(&mut h.app, &serde_json::json!({"name": "plate.stl", "data": a, "part": 0, "last": false})).unwrap()["last"], false);
++        let done = super::import_file(&mut h.app, &serde_json::json!({"name": "plate.stl", "data": rest, "part": 1, "last": true, "units": "mm"})).unwrap();
++        assert_eq!(done["bytes"], stl.len());
++        for _ in 0..200 {
++            h.frames(1);
++            if !h.app.file_load.busy() && !h.app.session.doc.features.is_empty() {
++                break;
++            }
++        }
++        assert!(!h.app.session.doc.features.is_empty(), "the mesh was inserted ({:?})", h.app.mesh_units.as_ref().map(|a| &a.path));
++        // Without `units`, an STL asks, as a drop does.
++        let mut asked = crate::scenario::Harness::new();
++        super::import_file(&mut asked.app, &serde_json::json!({"name": "plate.stl", "data": b64})).unwrap();
++        assert!(asked.app.mesh_units.is_some(), "the unit is asked");
++        let refuse = |p: serde_json::Value| super::import_file(&mut crate::scenario::Harness::new().app, &p).unwrap_err();
++        assert!(refuse(serde_json::json!({"name": "a.exe", "data": "AAAA"})).contains("not a kind of file"));
++        assert!(refuse(serde_json::json!({"name": "../a.stl", "data": "AAAA"})).contains("no folders"));
++        assert!(refuse(serde_json::json!({"name": "a.stl", "data": "!!!!"})).contains("base64"));
++        assert!(refuse(serde_json::json!({"name": "a.stl", "data": "AAAA", "part": 1})).contains("without part 0"));
++    }
++
+     fn title_commands(app: &mut SolveApp) -> Vec<String> {
+         let ctx = egui::Context::default();
+         let mut output = ctx.run_ui(Default::default(), |ui| sync_window_title(app, ui.ctx()));
+diff --git a/docs/control-protocol.md b/docs/control-protocol.md
+index d2d497c0..577cec40 100644
+--- a/docs/control-protocol.md
++++ b/docs/control-protocol.md
+@@ -665,6 +665,7 @@ a menu (neither describes the open one).
+ | `mcp.options` | — | `{"compact": bool}`: the output the MCP server bridged to this app should give its agents (Preferences › AI › Agents through MCP, `ui.prefs` `mcp_compact`, default false; [MCP](mcp.md#compact-output)) |
+ | `document.export` | — | `{name, revision, dirty, format, text}`: the active design as its file holds it, for a host that keeps the files itself ([browser command API](browser-api.md)). `text` is the design's JSON, what a `.json` design file holds; `format` is `"json"`; `revision` is the one `document.revision` answers for this state. Only reads |
+ | `document.import` | `text`: a design's JSON; `name?`: the name it takes | `{name, features, errors, revision}`: replaces the active design with `text`, timeline and parameters as saved; it opens saved, with a new `document_id` and nothing to undo. It does not ask about unsaved changes in the design it replaces: that is the caller's to decide. A text that does not read changes nothing. Waits behind a file loading or a design change, and evaluates on the window thread in the frame it runs |
++| `document.import_file` | `name`: the file's name (`bracket.step`), `data`: the file in base64; `part?` (0, 1, …) and `last?` (default true) for a file sent in parts; `units?` (`mm`, `in`, …) for a file that states none (STL, OBJ), which otherwise asks | `{name, bytes, started}`, or `{name, part, last: false}` for a part before the last: imports the file into the open design as dropping it there does (CAD bodies, meshes, point clouds, DXF drawings, a KiCad board), in the background (`ui.inspect`'s `file_busy`). For a page that embeds the app, which gets no drops and no file picker. A design file goes to `document.import` instead |
+ | `document.saved` | `revision`: as `document.export` gave it | `{revision, dirty}`: the host saved the design at that revision, so it counts as saved from there. Refused when the design has changed since |
+ 
+ The selection alone is the engine command `selection.get` (run it with `engine.execute`; read-only, no undo step, headless too): `{count, items}`, each item as `select.set` takes it (`type`, `body`, `index`, `point`, `id`, `sketch`, `path`…) with `kind` and, unless `detail: false`, what it resolves to: a face's persistent `name`, `surface` (`plane` with `normal`, `cylinder` with `origin`, `axis` and `radius`, `cone`, `sphere`, `torus`, or `other`) and `area_mm2`; an edge's persistent `name`, `curve` (`line`, `circle`, `arc`, `other`), `length_mm`, `start`, `end` and, when round, `center`, `axis` and `radius`; a body's `volume_mm3`, `feature` and `visible`; a body item's `component` and `occurrence_path` in an assembly; a sketch item's `sketch` (its id, so the item can go back to `select.set`), `sketch_name` and `entity` (a line's `sketch_midpoint` gives `midpoint` and its `position`). `ui.selection` (below) reports the window's view of it with the open dialog's inputs and the hovered item.
+-- 
+2.55.0
+

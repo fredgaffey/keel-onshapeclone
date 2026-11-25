@@ -1,5 +1,6 @@
 import { api, esc, when, toast, initials, registerServiceWorker } from './api.js';
 import * as local from './local.js';
+import { ACCEPT, READABLE, UNIT_CHOICES, formatOf, nameFromFile } from './formats.js';
 
 const root = document.getElementById('root');
 const who = document.getElementById('who');
@@ -86,7 +87,7 @@ async function showHome(offline = false) {
     <div class="home">
       <nav class="side">
         <button class="btn primary create" id="create">+ Create</button>
-        <button class="btn" id="import" style="justify-content:center">Import design file…</button>
+        <button class="btn" id="import" style="justify-content:center" title="STEP, IGES, STL, 3MF, OBJ, glTF, point clouds, DXF, KiCad, or a Keel/SolidCraft design. You can also drop a file anywhere here.">Import a file…</button>
         <div style="height:10px"></div>
         <button class="nav" data-view="all">All documents <span class="count" id="c-all"></span></button>
         <button class="nav" data-view="mine">Owned by me <span class="count" id="c-mine"></span></button>
@@ -106,6 +107,7 @@ async function showHome(offline = false) {
   document.getElementById('search').oninput = (e) => { query = e.target.value.toLowerCase(); render(); };
   document.getElementById('create').onclick = createDialog;
   document.getElementById('import').onclick = importFile;
+  wireDrops();
   await load(offline);
   renderBackup();
 }
@@ -255,18 +257,83 @@ async function uploadOfflineDocs() {
 function importFile() {
   const input = document.createElement('input');
   input.type = 'file';
-  input.accept = '.sc,.solidcraft,.json,application/json';
-  input.onchange = async () => {
-    const file = input.files[0];
-    if (!file) return;
-    const text = await file.text();
-    let name = file.name.replace(/\.(sc|solidcraft|json)$/i, '').replace(/ \([A-Za-z0-9-]+\)$/, '');
-    try { name = JSON.parse(text).name && name === 'Untitled' ? JSON.parse(text).name : name; } catch {
-      return toast('That file isn\'t a SolidCraft design. To bring in STEP or STL, open a document and use its Insert commands.', 'error', 7000);
-    }
-    createDoc(name, text);
-  };
+  input.accept = ACCEPT;
+  input.onchange = () => input.files[0] && importOne(input.files[0]);
   input.click();
+}
+
+/** A file dropped anywhere on the documents page is imported too. */
+function wireDrops() {
+  if (document.body.dataset.drops) return;
+  document.body.dataset.drops = '1';
+  const over = (e) => { if ([...(e.dataTransfer?.types || [])].includes('Files')) { e.preventDefault(); document.body.classList.add('dropping'); } };
+  document.addEventListener('dragover', over);
+  document.addEventListener('dragleave', (e) => { if (!e.relatedTarget) document.body.classList.remove('dropping'); });
+  document.addEventListener('drop', (e) => {
+    document.body.classList.remove('dropping');
+    const file = e.dataTransfer?.files?.[0];
+    if (!file || !me) return;
+    e.preventDefault();
+    importOne(file);
+  });
+}
+
+/** Turn a file into a document: designs open as they are; CAD, meshes, point clouds, drawings
+ *  and boards become a new document the editor converts (in this browser) when it opens. */
+async function importOne(file) {
+  const format = formatOf(file.name);
+  if (!format) return toast(`Keel can't read ${file.name}. It imports ${READABLE}, and Keel or SolidCraft designs.`, 'error', 8000);
+  if (format.kind === 'closed') return closedFormat(file, format);
+  if (format.kind === 'design') {
+    const text = await file.text();
+    let name = nameFromFile(file.name);
+    try { const d = JSON.parse(text); if (typeof d.format !== 'string' || !Array.isArray(d.features)) throw 0; if (name === 'Untitled' && d.name) name = d.name; } catch {
+      return toast(`${file.name} isn't a Keel or SolidCraft design (it isn't the JSON they save).`, 'error', 7000);
+    }
+    return createDoc(name, text);
+  }
+  if (file.size > 512 * 1024 * 1024) return toast(`${file.name} is over 512 MB, too big to import in the browser.`, 'error');
+  let units = null;
+  if (format.units) {
+    units = await chooseUnits(file.name);
+    if (!units) return;
+  }
+  try {
+    const { document: doc } = await api('/docs', { method: 'POST', body: { name: nameFromFile(file.name) } });
+    // The editor picks it up from this device's storage and converts it when the modeller is ready.
+    await local.setKv(`import:${doc.id}`, { name: file.name, blob: file, units, kind: format.kind, label: format.label, at: Date.now() });
+    location.href = `/d/${doc.id}`;
+  } catch (e) {
+    toast(e.status === 0 ? 'Importing needs a connection the first time: the document is made on the server.' : e.message, 'error');
+  }
+}
+
+function chooseUnits(fileName) {
+  return new Promise((resolve) => {
+    const dlg = document.createElement('dialog');
+    dlg.innerHTML = `<form method="dialog"><div class="head">Units of ${esc(fileName)}</div>
+      <div class="content"><p class="meta" style="margin:0 0 10px">STL and OBJ files don't say what unit their numbers are in. Which is it?</p>
+      <select aria-label="Units">${UNIT_CHOICES.map(([v, label]) => `<option value="${v}">${label}</option>`).join('')}</select></div>
+      <div class="actions"><button class="btn" value="cancel">Cancel</button><button class="btn primary" value="ok">Import</button></div></form>`;
+    document.body.append(dlg);
+    const select = dlg.querySelector('select');
+    dlg.addEventListener('close', () => { resolve(dlg.returnValue === 'ok' ? select.value : null); dlg.remove(); });
+    dlg.showModal();
+  });
+}
+
+function closedFormat(file, format) {
+  const dlg = document.createElement('dialog');
+  dlg.innerHTML = `<form method="dialog"><div class="head">${esc(format.label)} files need exporting first</div>
+    <div class="content">
+      <p style="margin:0 0 10px">${esc(file.name)} is in ${esc(format.from)}'s own format, which only ${esc(format.from)} (and its maker's services) can read.</p>
+      <p style="margin:0 0 10px"><b>${esc(format.how)}</b></p>
+      <p class="meta" style="margin:0">STEP keeps exact solids, so the result is a proper CAD model you can keep editing in Keel. Keel imports ${esc(READABLE)}.</p>
+    </div>
+    <div class="actions"><button class="btn primary" value="ok">OK</button></div></form>`;
+  document.body.append(dlg);
+  dlg.addEventListener('close', () => dlg.remove());
+  dlg.showModal();
 }
 
 // ---------------- backup folder ----------------

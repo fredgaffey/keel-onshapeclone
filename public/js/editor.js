@@ -335,6 +335,7 @@ async function onMessage(msg) {
       }
       hideLoading();
       send({ type: 'host', on: hostAllowed(), dedicated: dedicatedHost });
+      if (!importChecked) { importChecked = true; pendingImport(); } // not awaited: it takes a while
       if (dedicatedHost) banner('This tab is working for agents: they inspect, screenshot and model here. Keep it open (and visible) while they work.');
       else if (S.role === 'view') banner('View only: you can look around and measure, but changes aren\'t saved.');
       else if (S.expires) banner(`Loose document, with no account: it will be deleted on ${new Date(S.expires).toLocaleString(undefined, { dateStyle: 'full', timeStyle: 'short' })}. Anyone with this page's address can edit it. Download it to keep a copy.`);
@@ -438,6 +439,59 @@ function renderPeers() {
   const who = (p) => (p.agent ? p.conn : p.id); // an agent shares its person's id but shows apart
   const others = S.peers.filter((p, i, all) => all.findIndex((q) => who(q) === who(p)) === i);
   $('peers').innerHTML = others.map((p) => `<span class="avatar" style="background:${esc(p.color)}" title="${esc(p.name)}${p.agent ? ' (agent)' : p.id === S.me?.id ? ' (you)' : ''}${p.role === 'view' ? ' · viewing' : ''}${p.activity ? ` · ${esc(p.activity)}` : ''}">${esc(initials(p.name))}</span>`).join('');
+}
+
+// ---------------- importing a file ----------------
+// The home page made this document for a STEP, mesh, drawing… file and left the file on this
+// device; SolidCraft converts it here (document.import_file), and the result saves as an edit.
+
+let importChecked = false;
+
+async function pendingImport() {
+  let job = null;
+  try { job = await local.getKv(`import:${docId}`); } catch { /* no storage */ }
+  if (!job || !job.blob || S.role !== 'edit') return;
+  const forget = () => local.setKv(`import:${docId}`, undefined).catch(() => {});
+  banner(`Importing ${job.name} (${(job.blob.size / 1e6).toFixed(1)} MB). It's converted here, in your browser.`);
+  try {
+    const before = (await S.cad.request('document.revision')).revision;
+    const PART = 6 * 1024 * 1024; // base64 of a part stays well under a request's 16 MiB
+    const parts = Math.max(1, Math.ceil(job.blob.size / PART));
+    for (let i = 0; i < parts; i++) {
+      const data = await base64(job.blob.slice(i * PART, (i + 1) * PART));
+      await S.cad.request('document.import_file', { name: job.name, data, part: i, last: i === parts - 1, ...(job.units ? { units: job.units } : {}) });
+    }
+    // The conversion runs in the background: wait for it to change the design (or to fail).
+    const deadline = Date.now() + 15 * 60_000;
+    let ui = null;
+    for (;;) {
+      await sleep(500);
+      const rev = (await S.cad.request('document.revision')).revision;
+      ui = await S.cad.request('ui.inspect').catch(() => null);
+      const busy = ui && (ui.file_busy || ui.inspect?.file_busy);
+      if (rev !== before && !busy) break;
+      if (!busy && ui?.status?.error) throw new Error(ui.status.text || 'the modeller refused the file');
+      if (Date.now() > deadline) throw new Error('it took longer than 15 minutes');
+    }
+    await forget();
+    await S.cad.request('ui.view', { view: 'iso' }).catch(() => {});
+    await S.cad.request('ui.view', { view: 'fit' }).catch(() => {});
+    $('banner').innerHTML = '';
+    toast(`Imported ${job.name}. It's saved in this document and kept in step with everyone.`, 'ok', 6000);
+  } catch (e) {
+    await forget();
+    banner(`Couldn't import ${job.name}: ${e.message}. You can try again from your documents (Import a file).`);
+  }
+}
+
+/** A Blob as base64, without building a huge string by hand. */
+function base64(blob) {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => resolve(String(reader.result).slice(String(reader.result).indexOf(',') + 1));
+    reader.onerror = () => reject(reader.error);
+    reader.readAsDataURL(blob);
+  });
 }
 
 // ---------------- agent host ----------------
